@@ -1,0 +1,46 @@
+Blu-ray BD-J 菜单运行说明（Windows）
+=====================================
+
+1. 本压缩包已包含 BD-J（蓝光 Java 菜单）的全部运行组件，都放在
+   share\libbluray\ 下：
+     • libbluray-j2se-1.5.1.jar     （主 BD-J 类，--patch-module java.base）
+     • libbluray-awt-j2se-1.5.1.jar （AWT 补丁，--patch-module java.desktop）
+     • libbluray.jar                 （向后兼容兜底副本）
+     • jre\                         （jlink 精简 JRE：java.base/desktop/xml/
+                                      logging/prefs/rmi 六个模块，含 jvm.dll）
+   mpv 执行 --disc-menu=yes 时，libbluray 会通过 LIBBLURAY_CP 读取
+   「带版本号的 j2se jar」，然后用字符串公式自动找到 awt jar 并加载
+   JVM，最后渲染碟片自带的交互式菜单（Disney/UHD 碟几乎都用 BD-J 菜单；
+   如果禁用会直接进入主片播放）。
+   👉 重要：不要把 LIBBLURAY_CP 指向无版本号的 libbluray.jar，否则版本号
+   切片公式算出来的 awt jar 名为 NULL，最终依然会报 libbluray.jar=0。
+   👉 本包已自带 JRE，通常无需再安装 Java。若你的电脑已有 JAVA_HOME 且
+   包内 jre 缺失，启动器会自动回退使用你的 JAVA_HOME。
+
+2. 启动方式
+   --------
+   A. 最简单：双击 MPV-BD菜单启动.bat，然后把 ISO/BDMV 目录拖到窗口上；
+      或者在命令行里直接传路径：
+          MPV-BD菜单启动.bat  "D:\蓝光\壮志凌云2.iso"
+
+   B. 直接用 mpv.exe：
+          set LIBBLURAY_CP=<解压目录>\share\libbluray\libbluray-j2se-1.5.1.jar
+          set BLURAY_JVM_LIB_PATH=<解压目录>\share\libbluray\jre\bin\server\jvm.dll
+          mpv.exe --disc-menu=yes --bluray-device="D:\蓝光\碟.iso"  bd://
+
+3. 常见问题
+   --------
+   • 看到 "BD-J menus not supported. Java VM: 0, libbluray.jar: 0"：
+       – libbluray.jar=0：常见原因是 LIBBLURAY_CP 指向了不带版本号的
+         libbluray.jar（导致 jar 名切片公式算出 awt jar=NULL，libbluray
+         会把两个 classpath slot 一起清空 → 表现为 jar=0）。正确写法：
+         set LIBBLURAY_CP=…\share\libbluray\libbluray-j2se-1.5.1.jar
+         同时确认 share\libbluray\ 下同时存在 libbluray-j2se-1.5.1.jar
+         与 libbluray-awt-j2se-1.5.1.jar 两份 jar。
+       – Java VM=0：JVM 没被加载 —— 确认包内 share\libbluray\jre\bin\server\
+         jvm.dll 存在，或 JAVA_HOME 指向的目录下有 bin\server\jvm.dll。
+   • 菜单出来但全英文：是碟片自带的原始 BD-J 菜单，我们只解决 "能加载"；
+     "菜单中文化" 需要对原碟做 BDJ 修改，属于原盘制作层面的问题。
+   • 能播主片、但菜单按钮点击无响应或黑屏：BD-J Xlet 需要 Oracle/Adoptium
+     的 JDK 兼容字节码（j2se 模式），请确认 JRE 不是只支持 j2me 的老版本。
+     我们构建 libbluray 时使用的是 -Dbdj_type=j2se（标准 JVM）。

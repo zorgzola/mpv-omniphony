@@ -1,0 +1,67 @@
+﻿From f206ed5cec83d167e30ba86aa2c96edeca68f9da Mon Sep 17 00:00:00 2001
+From: Yiqiang Zheng <kenken7429@users.noreply.github.com>
+Date: Sat, 29 Aug 2026 10:47:24 +0800
+Subject: [PATCH] feat(stream/bluray): start BD-J playback on IDLE(1) via
+ bdpriv_select_rate
+
+---
+ stream/stream_bluray.c | 29 +++++++++++++++++++++++++++++ 8 --------
+ 1 file changed, 29 insertions(+), 8 deletions(-)
+
+diff --git a/stream/stream_bluray.c b/stream/stream_bluray.c
+index 04b2520..8583f2d 100644
+--- a/stream/stream_bluray.c
++++ b/stream/stream_bluray.c
+@@ -510,14 +510,23 @@ static int bluray_stream_fill_buffer(stream_t *s, void *buf, int len)
+         // BD-J applets reposition the stream, sometimes with no event.
+         // Detect it before reading so the new position's head survives.
+         if (!hopped && b->read_pos_known && bd_tell(b->bd) != b->next_read_pos) {
+-            MP_VERBOSE(s, "position warped (%"PRIu64" -> %"PRIu64"), "
+-                       "treating as a jump\n", b->next_read_pos, bd_tell(b->bd));
+-            b->read_pos_known = false;
+-            mp_mutex_lock(&b->overlay_lock);
+-            if (b->discontinuity_id == disc_id)
+-                b->discontinuity_id++;
+-            mp_mutex_unlock(&b->overlay_lock);
+-            hopped = true;
++            if (bd_tell(b->bd) < b->next_read_pos) {
++                // Position went backwards: a BD-J applet prefetching a
++                // playlist (bd_play_playlist_at) rewinds the stream to the
++                // playlist start. Drop position tracking and let the pending
++                // PLAYLIST / IDLE(1) events (handled below) confirm the
++                // switch, so the rewind is not mistaken for a nav jump.
++                b->read_pos_known = false;
++            } else {
++                MP_VERBOSE(s, "position warped (%"PRIu64" -> %"PRIu64"), "
++                           "treating as a jump\n", b->next_read_pos, bd_tell(b->bd));
++                b->read_pos_known = false;
++                mp_mutex_lock(&b->overlay_lock);
++                if (b->discontinuity_id == disc_id)
++                    b->discontinuity_id++;
++                mp_mutex_unlock(&b->overlay_lock);
++                hopped = true;
++            }
+         }
+         // Once a jump was detected, stop consuming data (it belongs to the
+         // new position and the slave demuxer must be reopened first); a
+@@ -552,6 +552,18 @@ static int bluray_stream_fill_buffer(stream_t *s, void *buf, int len)
+             break;
+         case BD_EVENT_IDLE:
+             bdj_idle = true;
++            // BD-J prefetched a playlist (bdj_wait_start=1): bd_read_ext()
++            // returns IDLE(1)+0 bytes until bdpriv_select_rate() starts it.
++            // Without this, the demuxer sees EOF after a menu item is
++            // clicked and mpv exits. Reason 1 = BDJ_PLAYBACK_START.
++            if (ev.param == 1) {
++                bdpriv_select_rate(b->bd, 1.0f, 1);
++                // bd_play_playlist_at() rewound the stream to the playlist
++                // start; drop position tracking so the next read is not
++                // misdetected as a "position warped" jump (which would
++                // force a pointless slave-demuxer reopen and replay).
++                b->read_pos_known = false;
++            }
+             break;
+         case BD_EVENT_STILL:
+             mp_mutex_lock(&b->overlay_lock);
+-- 
+2.50.1 (Apple Git-155)
