@@ -489,6 +489,7 @@ jobs:
         run: |
           pacman -S --noconfirm --needed \
             base-devel git unzip zip curl rustup nasm \
+            shaderc \
             mingw-w64-gcc \
             mingw-w64-pkg-config \
             mingw-w64-meson \
@@ -497,6 +498,11 @@ jobs:
             mingw-w64-shaderc mingw-w64-spirv-cross mingw-w64-lcms2 mingw-w64-zlib \
             mingw-w64-libdvdnav mingw-w64-libdvdread \
             mingw-w64-opus
+          # ^ shaderc (host) provides /usr/bin/glslc: the FEL ffmpeg master build
+          # compiles its Vulkan shaders (.comp -> .spv) with the *host* glslc at
+          # compile time. mingw-w64-shaderc alone ships only the Windows-target
+          # libs/binaries, so without the host package the cross build dies with
+          # "glslc: command not found" in libavcodec.
           # ^ DVD playback (folder + ISO) from Martchus; libdvdnav -> libdvdread
           # read images natively. libbluray is built from source with embedded
           # libudfread in a later step (Martchus's lacks udfread = BD folders
