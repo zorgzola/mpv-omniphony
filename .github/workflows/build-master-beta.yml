@@ -62,6 +62,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             meson ninja-build pkg-config gcc nasm git patchelf zlib1g-dev \
+            autoconf automake libtool \
             libass-dev liblua5.2-dev \
             libvulkan-dev libshaderc-dev glslang-dev liblcms2-dev \
             libva-dev libdrm-dev libegl-dev libgl-dev \
@@ -117,13 +118,18 @@ jobs:
           set -euo pipefail
           PREFIX="$GITHUB_WORKSPACE/fel-prefix"
           export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-          # zimg >= 3.0.5 (VapourSynth R80's meson floor; noble ships an older one)
+          # zimg >= 3.0.5 (VapourSynth R80's meson floor; noble ships an older one).
+          # zimg's release tarballs are AUTOTOOLS (Makefile.am, no meson.build),
+          # so build with autogen.sh+configure, not meson.
           if ! pkg-config --atleast-version=3.0.5 zimg 2>/dev/null; then
             curl -fsSLO https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.5.tar.gz
             tar xf release-3.0.5.tar.gz
-            meson setup zimg-release-3.0.5/_b zimg-release-3.0.5 \
-              --prefix="$PREFIX" --libdir=lib --buildtype=release
-            meson install -C zimg-release-3.0.5/_b
+            cd zimg-release-3.0.5
+            ./autogen.sh
+            ./configure --prefix="$PREFIX" --libdir="$PREFIX/lib"
+            make -j"$(nproc)"
+            make install
+            cd "$GITHUB_WORKSPACE"
           fi
           python3 -m pip install --break-system-packages -q 'Cython>=3.3.0' cython 2>/dev/null \
             || python3 -m pip install --user -q 'Cython>=3.3.0' cython
@@ -297,8 +303,7 @@ jobs:
             libass luajit lcms2 shaderc glslang \
             molten-vk vulkan-headers vulkan-loader \
             libbluray libdvdnav libdvdread \
-            opus \
-            vapoursynth
+            opus zimg python3
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -327,6 +332,36 @@ jobs:
           pkg-config --atleast-version=7.370 libplacebo
           echo "libplacebo $(pkg-config --modversion libplacebo)"
           "$GITHUB_WORKSPACE/fel-prefix/bin/ffmpeg" -hide_banner -bsfs | grep -q dovi_split
+
+      # VapourSynth: same runtime-dlopen rationale as the Linux job. The brew
+      # `vapoursynth` formula refuses to install on this runner (builds from
+      # source and dies in its python3.14 pip metadata step), so build R80 into
+      # the FEL prefix instead; zimg comes from brew (3.0.6 >= 3.0.5).
+      - name: Build VapourSynth into the FEL prefix
+        run: |
+          set -euo pipefail
+          PREFIX="$GITHUB_WORKSPACE/fel-prefix"
+          export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          # /usr/bin/python3 is the Xcode CLT 3.9; VapourSynth R80 needs >= 3.12.
+          # Homebrew python3 (installed in the deps step) provides 3.14 — pin PATH.
+          PY_BIN="$(brew --prefix python3)/bin/python3"
+          [ -x "$PY_BIN" ] || PY_BIN="$(command -v python3)"
+          "$PY_BIN" -c 'import sys; assert sys.version_info >= (3,12), sys.version' \
+            || { echo "!! need python>=3.12 for VapourSynth R80 (found $("$PY_BIN" --version 2>&1))" >&2; exit 1; }
+          export PATH="$(dirname "$PY_BIN"):$PATH"
+          "$PY_BIN" -m pip install --user -q 'Cython>=3.3.0' cython
+          curl -fsSLO https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R80.tar.gz
+          tar xf R80.tar.gz
+          cd vapoursynth-R80
+          # meson builds the core + VSScript4 (Cython-generated C) and installs
+          # libvapoursynth-script.dylib + vapoursynth-script.pc (API 80).
+          meson setup _b --prefix="$PREFIX" --libdir=lib \
+            --buildtype=release -Db_lto=false
+          meson compile -C _b
+          meson install -C _b
+          cd "$GITHUB_WORKSPACE"
+          pkg-config --atleast-version=56 vapoursynth-script
+          ls "$PREFIX"/lib/libvapoursynth*.dylib* >/dev/null
 
       - name: Checkout Omniphony (renderer source)
         uses: actions/checkout@v5
@@ -447,7 +482,7 @@ jobs:
           # VapourSynth is dlopen'd at runtime (never linked), so neither
           # dylib_unhell nor the worklist above saw it. Pull its dylibs (and the
           # brew zimg they depend on) into the same @executable_path/lib layout.
-          VP_LIB="$(brew --prefix vapoursynth)/lib"
+          VP_LIB="$GITHUB_WORKSPACE/fel-prefix/lib"
           ZIMG_LIB="$(brew --prefix zimg)/lib"
           for f in "$VP_LIB"/libvapoursynth-script.dylib "$VP_LIB"/libvapoursynth.dylib \
                    "$ZIMG_LIB"/libzimg.dylib "$ZIMG_LIB"/libzimg.*.dylib; do
