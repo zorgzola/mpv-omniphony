@@ -70,7 +70,8 @@ jobs:
             libwayland-dev wayland-protocols libxkbcommon-dev \
             libasound2-dev libpipewire-0.3-dev libpulse-dev \
             libopus-dev \
-            libffi-dev libexpat1-dev
+            libffi-dev libexpat1-dev \
+            python3-dev python3-pip
           # x11: libx11-dev alone is NOT enough — mpv's meson x11 feature also
           # requires xscrnsaver/xext/xpresent/xrandr, and silently disables the
           # whole X11 vo when any of them is missing (issue #59: assets shipped
@@ -104,6 +105,42 @@ jobs:
           pkg-config --atleast-version=7.370 libplacebo
           echo "libplacebo $(pkg-config --modversion libplacebo)"
           ffmpeg -hide_banner -bsfs | grep -q dovi_split
+
+      # VapourSynth: mpv's vf_vapoursynth is a *runtime-dlopen* filter — the build
+      # only needs the headers + vapoursynth.pc (mpv meson: vapoursynth-script
+      # >= 56, Cflags/-I only, no linking), while mpv loads libvapoursynth-script
+      # at play time. Build the real libs into the FEL prefix so we can bundle
+      # them next to the binary. Ubuntu ships no vapoursynth (noble has none) and
+      # an older zimg, so build zimg >= 3.0.5 first.
+      - name: Build VapourSynth into the FEL prefix
+        run: |
+          set -euo pipefail
+          PREFIX="$GITHUB_WORKSPACE/fel-prefix"
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          # zimg >= 3.0.5 (VapourSynth R80's meson floor; noble ships an older one)
+          if ! pkg-config --atleast-version=3.0.5 zimg 2>/dev/null; then
+            curl -fsSLO https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.5.tar.gz
+            tar xf release-3.0.5.tar.gz
+            meson setup zimg-release-3.0.5/_b zimg-release-3.0.5 \
+              --prefix="$PREFIX" --libdir=lib --buildtype=release
+            meson install -C zimg-release-3.0.5/_b
+          fi
+          python3 -m pip install --break-system-packages -q 'Cython>=3.3.0' cython 2>/dev/null \
+            || python3 -m pip install --user -q 'Cython>=3.3.0' cython
+          curl -fsSLO https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R80.tar.gz
+          tar xf R80.tar.gz
+          cd vapoursynth-R80
+          # -Db_lto=false: LTO is on by default and costs minutes for no benefit
+          # here. meson builds the core + VSScript4 (Cython-generated C) and
+          # installs libvapoursynth-script.so + vapoursynth-script.pc (API 80).
+          meson setup _b --prefix="$PREFIX" --libdir=lib \
+            --buildtype=release -Db_lto=false
+          meson compile -C _b
+          meson install -C _b
+          cd "$GITHUB_WORKSPACE"
+          pkg-config --atleast-version=56 vapoursynth-script || {
+            pkg-config --exists vapoursynth || { echo "!! vapoursynth-script pc missing" >&2; exit 1; }; }
+          ls "$PREFIX/lib"/libvapoursynth*.so* >/dev/null
 
       # mpv master needs wayland-client/-cursor/-scanner >= 1.23 (hard meson
       # requirement) and in practice wayland-protocols >= 1.44: its meson floor
@@ -201,7 +238,8 @@ jobs:
             -Dvaapi=auto -Dvulkan=enabled \
             -Dx11=enabled -Dwayland=enabled \
             -Dalsa=enabled -Dpipewire=enabled -Dpulse=enabled \
-            -Dlibbluray=enabled -Ddvdnav=enabled
+            -Dlibbluray=enabled -Ddvdnav=enabled \
+            -Dvapoursynth=enabled
           meson compile -C _b
           echo "== mpv libplacebo linkage =="
           ldd _b/mpv | grep -E 'libplacebo|libavcodec' || true
@@ -220,6 +258,11 @@ jobs:
           # mpv find them via rpath, so the zip actually renders FEL (otherwise it
           # silently falls back to base layer against system libs).
           cp -P "$PREFIX"/lib/lib{placebo,dovi,av*,sw*}*.so* staging/lib/ 2>/dev/null || true
+          # VapourSynth runtime (mpv dlopens libvapoursynth-script.so / libvsscript.so
+          # and needs libvapoursynth.so + libzimg.so in turn). Copied next to the
+          # binary; mpv's $ORIGIN/lib RUNPATH resolves them via dlopen too.
+          cp -P "$PREFIX"/lib/libvapoursynth*.so* staging/lib/ 2>/dev/null || true
+          cp -P "$PREFIX"/lib/libzimg.so* staging/lib/ 2>/dev/null || true
           patchelf --set-rpath '$ORIGIN/lib' staging/mpv
           cd staging
           zip -r "../mpv-omniphony-fel-linux-x86_64.zip" .
@@ -254,7 +297,8 @@ jobs:
             libass luajit lcms2 shaderc glslang \
             molten-vk vulkan-headers vulkan-loader \
             libbluray libdvdnav libdvdread \
-            opus
+            opus \
+            vapoursynth
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -349,7 +393,8 @@ jobs:
           # GUI display stack is built; mpv's macos-bundle relocates everything next.
           meson setup _b -Dorender=enabled -Dvulkan=enabled \
             -Dlibbluray=enabled -Ddvdnav=enabled \
-            -Dcocoa=enabled -Dswift-build=enabled
+            -Dcocoa=enabled -Dswift-build=enabled \
+            -Dvapoursynth=enabled
           meson compile -C _b
           echo "== mpv libplacebo linkage =="
           otool -L _b/mpv | grep -E 'libplacebo|libavcodec' || true
@@ -398,6 +443,40 @@ jobs:
               install_name_tool -change "$ref" "@executable_path/lib/$base" "$obj" 2>/dev/null || true
             done < <(otool -L "$obj" | awk 'NR>1 {print $1}' | grep -E "^($PREFIX|/opt/homebrew|/usr/local)/")
           done
+
+          # VapourSynth is dlopen'd at runtime (never linked), so neither
+          # dylib_unhell nor the worklist above saw it. Pull its dylibs (and the
+          # brew zimg they depend on) into the same @executable_path/lib layout.
+          VP_LIB="$(brew --prefix vapoursynth)/lib"
+          ZIMG_LIB="$(brew --prefix zimg)/lib"
+          for f in "$VP_LIB"/libvapoursynth-script.dylib "$VP_LIB"/libvapoursynth.dylib \
+                   "$ZIMG_LIB"/libzimg.dylib "$ZIMG_LIB"/libzimg.*.dylib; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            if [ ! -f "$LIBDIR/$base" ]; then
+              cp -L "$f" "$LIBDIR/$base"; chmod u+w "$LIBDIR/$base"
+              install_name_tool -id "@executable_path/lib/$base" "$LIBDIR/$base"
+              echo "  + VS dylib $base"
+            fi
+            worklist+=("$LIBDIR/$base")
+          done
+          # Re-run relocation for the VS/zimg dylibs, now also resolving @rpath refs.
+          while [ ${#worklist[@]} -gt 0 ]; do
+            obj="${worklist[0]}"; worklist=("${worklist[@]:1}")
+            while read -r ref; do
+              base=$(basename "$ref")
+              if [ ! -f "$LIBDIR/$base" ]; then
+                real="$ref"; [ -f "$real" ] || real="$VP_LIB/$base"; [ -f "$real" ] || real="$ZIMG_LIB/$base"
+                [ -f "$real" ] || { echo "  ! VS NOT FOUND: $ref" >&2; continue; }
+                cp -L "$real" "$LIBDIR/$base"; chmod u+w "$LIBDIR/$base"
+                install_name_tool -id "@executable_path/lib/$base" "$LIBDIR/$base"
+                worklist+=("$LIBDIR/$base"); echo "  + VS relocated $base"
+              fi
+              install_name_tool -change "$ref" "@executable_path/lib/$base" "$obj" 2>/dev/null || true
+            done < <(otool -L "$obj" | awk 'NR>1 {print $1}' | grep -E "^(/opt/homebrew|/usr/local|@rpath)/")
+          done
+          otool -L "$LIBDIR"/libvapoursynth-script*.dylib | grep -q libvapoursynth \
+            || { echo "!! VapourSynth dylibs not wired into the bundle" >&2; exit 1; }
 
       - name: Brand, verify and package the .app
         run: |
@@ -680,6 +759,39 @@ jobs:
       - name: Setup ASIO SDK
         uses: ./.github/actions/setup-asio-sdk
 
+      # VapourSynth: mpv's vf_vapoursynth only needs the VSScript4 headers + a
+      # vapoursynth-script(.pc) >= 56 at build time (meson uses Cflags/-I, no
+      # linking — the filter dlopens VSScript.dll at runtime). Pull the headers
+      # from the R80 source tarball into the MinGW sysroot and write a .pc.
+      - name: Install VapourSynth headers into MinGW sysroot
+        run: |
+          set -euo pipefail
+          SYS=/usr/x86_64-w64-mingw32
+          curl -fsSL https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R80.tar.gz | tar xz
+          cp -r vapoursynth-R80/include/. "$SYS/include/"
+          cat > "$SYS/lib/pkgconfig/vapoursynth.pc" <<EOF
+          prefix=$SYS
+          includedir=\${prefix}/include
+
+          Name: vapoursynth
+          Description: VapourSynth video processing framework (VSScript4 headers, runtime-dlopen)
+          Version: 80
+          Cflags: -I\${includedir}
+          EOF
+          # mpv prefers `vapoursynth-script`; mirror the .pc so the >= 56 check
+          # matches by name too.
+          cat > "$SYS/lib/pkgconfig/vapoursynth-script.pc" <<EOF
+          prefix=$SYS
+          includedir=\${prefix}/include
+
+          Name: vapoursynth-script
+          Description: VapourSynth VSScript4 API (headers only, runtime-dlopen)
+          Version: 80
+          Cflags: -I\${includedir}
+          EOF
+          x86_64-w64-mingw32-pkg-config --atleast-version=56 vapoursynth-script
+          test -f "$SYS/include/VSScript4.h"
+
       - name: Cross-compile mpv (MinGW, linked against FEL sysroot)
         run: |
           cd "$MPV_DIR"
@@ -688,7 +800,8 @@ jobs:
           meson setup _b \
             --cross-file="$GITHUB_WORKSPACE/sysroot/mingw-cross.ini" \
             -Dorender=enabled -Dlua=lua52 -Dasio=enabled -Dasio-sdk="$ASIO_SDK_DIR" -Dd3d11=enabled -Dcuda-hwaccel=enabled \
-            -Dlibbluray=enabled -Ddvdnav=enabled
+            -Dlibbluray=enabled -Ddvdnav=enabled \
+            -Dvapoursynth=enabled
           meson compile -C _b
 
       - name: Package (zip, DLL-walker bundles FEL DLLs from sysroot)
@@ -724,6 +837,20 @@ jobs:
           for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
             [ -f "$SYS/bin/$dll" ] && [ ! -f "staging/$dll" ] && cp "$SYS/bin/$dll" staging/ && echo "  + $dll (forced)"
           done
+          # VapourSynth runtime: vf_vapoursynth dlopens VSScript.dll next to
+          # mpv.exe, which loads vapoursynth.dll in turn (same directory). Pull
+          # both from the official R80 portable zip so the build is self-contained
+          # (plugins/cores are NOT bundled — users install full VapourSynth for
+          # those, or point the filter at their own install).
+          curl -fsSLo vsportable.zip \
+            https://github.com/vapoursynth/vapoursynth/releases/download/R80/VapourSynth64-Portable-R80.zip
+          unzip -o -q vsportable.zip -d vsportable
+          vsdll=$(find vsportable -iname 'VSScript.dll' -o -iname 'vapoursynth.dll' -o -iname 'libvapoursynth.dll' | head -n2)
+          echo "$vsdll"
+          while read -r dll; do
+            [ -z "$dll" ] && continue
+            cp "$dll" "staging/$(basename "$dll")" && echo "  + $(basename "$dll") (VapourSynth)"
+          done <<< "$vsdll"
           ls -la staging/
           cd staging && zip -r "../mpv-omniphony-fel-windows-x86_64.zip" .
 
