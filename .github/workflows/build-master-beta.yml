@@ -164,11 +164,14 @@ jobs:
           meson setup _b --prefix="$PREFIX" --libdir=lib \
             --buildtype=release -Db_lto=false
           meson compile -C _b
-          # meson 1.3's pycompile custom install script dies silently (exit 1/2)
+          # meson's pycompile custom install script dies silently (exit 1/2)
           # on the hosted runners: its MESON_INSTALL_* env lookup is keyed to
           # the python meson was told to use, which disagrees with the runner's
-          # interpreter. The pyc bytecode is only a cache optimisation --
-          # VSScript's C API needs none of it -- so neutralise the script.
+          # interpreter. Byte-compilation is only a pyc cache optimisation --
+          # VSScript's C API needs none of it -- so blank the manifest it
+          # reads and no-op the script itself: whichever copy meson runs
+          # exits 0.
+          for m in _b/meson-private/python-*-installed.json; do echo '[]' > "$m"; done
           printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > _b/meson-private/pycompile.py
           meson install -C _b
           cd "$GITHUB_WORKSPACE"
@@ -416,11 +419,14 @@ jobs:
           meson setup _b --prefix="$PREFIX" --libdir=lib \
             --buildtype=release -Db_lto=false
           meson compile -C _b
-          # meson 1.3's pycompile custom install script dies silently (exit 1/2)
+          # meson's pycompile custom install script dies silently (exit 1/2)
           # on the hosted runners: its MESON_INSTALL_* env lookup is keyed to
           # the python meson was told to use, which disagrees with the runner's
-          # interpreter. The pyc bytecode is only a cache optimisation --
-          # VSScript's C API needs none of it -- so neutralise the script.
+          # interpreter. Byte-compilation is only a pyc cache optimisation --
+          # VSScript's C API needs none of it -- so blank the manifest it
+          # reads and no-op the script itself: whichever copy meson runs
+          # exits 0.
+          for m in _b/meson-private/python-*-installed.json; do echo '[]' > "$m"; done
           printf '#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n' > _b/meson-private/pycompile.py
           meson install -C _b
           cd "$GITHUB_WORKSPACE"
