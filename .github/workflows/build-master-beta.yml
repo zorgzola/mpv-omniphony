@@ -190,7 +190,9 @@ jobs:
           # /.. would otherwise point includedir at the wrong place after we copy
           # it into lib/pkgconfig), so the existing PKG_CONFIG_PATH and the
           # bundler's "$PREFIX"/lib/ globs pick everything up unchanged.
-          VPDIR="$(find "$PREFIX/lib" -maxdepth 3 -type d -name vapoursynth | head -n1)"
+          VPDIR="$(ls -d "$PREFIX"/lib/python3*/dist-packages/vapoursynth \
+                     "$PREFIX"/opt/homebrew/lib/python3*/site-packages/vapoursynth \
+                     "$PREFIX"/lib/python3*/site-packages/vapoursynth 2>/dev/null | head -n1)"
           [ -n "$VPDIR" ] || { echo "!! VapourSynth install dir not found" >&2; exit 1; }
           ln -sfn "$VPDIR" "$PREFIX/lib/vapoursynth"
           ln -sf "$VPDIR"/libvapoursynth*.so* "$VPDIR"/libvsscript*.so* "$PREFIX/lib/" 2>/dev/null || true
@@ -487,7 +489,9 @@ jobs:
           # /.. would otherwise point includedir at the wrong place after we copy
           # it into lib/pkgconfig), so the existing PKG_CONFIG_PATH and the
           # bundler's "$PREFIX"/lib/ globs pick everything up unchanged.
-          VPDIR="$(find "$PREFIX/lib" -maxdepth 3 -type d -name vapoursynth | head -n1)"
+          VPDIR="$(ls -d "$PREFIX"/lib/python3*/dist-packages/vapoursynth \
+                     "$PREFIX"/opt/homebrew/lib/python3*/site-packages/vapoursynth \
+                     "$PREFIX"/lib/python3*/site-packages/vapoursynth 2>/dev/null | head -n1)"
           [ -n "$VPDIR" ] || { echo "!! VapourSynth install dir not found" >&2; exit 1; }
           ln -sfn "$VPDIR" "$PREFIX/lib/vapoursynth"
           ln -sf "$VPDIR"/libvapoursynth* "$VPDIR"/libvsscript* "$PREFIX/lib/" 2>/dev/null || true
