@@ -149,6 +149,24 @@ jobs:
             make install
             cd "$GITHUB_WORKSPACE"
           fi
+          # VapourSynth R80's GPU filter paths use Vulkan-1.3.250 (maintenance5)
+          # + push-descriptor promoted symbols, which noble's libvulkan-dev
+          # headers only ship as KHR-suffixed variants. Install the Khronos
+          # release headers into the prefix and shadow the system vulkan.pc for
+          # this build (VS is headers-only here; the runtime dlopens the system
+          # libvulkan1 loader on demand).
+          curl -fsSLO https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.296.tar.gz
+          tar xf v1.3.296.tar.gz
+          mkdir -p "$PREFIX/include" "$PREFIX/lib/pkgconfig"
+          cp -r Vulkan-Headers-1.3.296/include/vulkan "$PREFIX/include/"
+          cat > "$PREFIX/lib/pkgconfig/vulkan.pc" <<EOF
+          prefix=$PREFIX
+          includedir=\${prefix}/include
+          Name: Vulkan
+          Description: Vulkan headers (Khronos release, build-time only)
+          Version: 1.3.296
+          Cflags: -I\${includedir}
+          EOF
           python3 -m pip install --break-system-packages -q 'Cython>=3.3.0' cython 2>/dev/null \
             || python3 -m pip install --user -q 'Cython>=3.3.0' cython
           curl -fsSLO https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R80.tar.gz
@@ -165,6 +183,10 @@ jobs:
           pkg-config --atleast-version=56 vapoursynth-script || {
             pkg-config --exists vapoursynth || { echo "!! vapoursynth-script pc missing" >&2; exit 1; }; }
           ls "$PREFIX/lib"/libvapoursynth*.so* >/dev/null
+          # Don't let the header-only vulkan.pc leak into the mpv build below:
+          # it carries no -l flag, so mpv's meson would fail to link libvulkan.
+          # The system vulkan.pc (-lvulkan, older headers) is fine for mpv.
+          rm -f "$PREFIX/lib/pkgconfig/vulkan.pc"
 
       # Replaces apt libbluray-dev (bdj_jar=disabled). Installs into the FEL
       # prefix so the shadower PKG_CONFIG_PATH wins for the mpv meson build and
