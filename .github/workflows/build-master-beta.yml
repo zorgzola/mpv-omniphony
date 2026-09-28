@@ -174,15 +174,30 @@ jobs:
           tar xf R80.tar.gz
           cd vapoursynth-R80
           # -Db_lto=false: LTO is on by default and costs minutes for no benefit
-          # here. meson builds the core + VSScript4 (Cython-generated C) and
-          # installs libvapoursynth-script.so + vapoursynth-script.pc (API 80).
+          # here. meson builds the core + VSScript4 (Cython-generated C). R80
+          # installs pip-style into python3's platlib (libvapoursynth.so.4 +
+          # libvsscript.so + vapoursynth.pc, API 80) — surfaced into the prefix
+          # lib/ layout after install so mpv's meson (vapoursynth >= 56, headers
+          # only) and the bundler find it.
           meson setup _b --prefix="$PREFIX" --libdir=lib \
             --buildtype=release -Db_lto=false
           meson compile -C _b
           meson install -C _b
           cd "$GITHUB_WORKSPACE"
-          pkg-config --atleast-version=56 vapoursynth-script || {
-            pkg-config --exists vapoursynth || { echo "!! vapoursynth-script pc missing" >&2; exit 1; }; }
+          # R80's meson installs into $prefix/lib/python3*/dist-packages/vapoursynth
+          # (its own pip-style layout), NOT $prefix/lib. Symlink that dir into
+          # $prefix/lib and fix the relocatable vapoursynth.pc (prefix=${pcfiledir}
+          # /.. would otherwise point includedir at the wrong place after we copy
+          # it into lib/pkgconfig), so the existing PKG_CONFIG_PATH and the
+          # bundler's "$PREFIX"/lib/ globs pick everything up unchanged.
+          VPDIR="$(find "$PREFIX/lib" -maxdepth 3 -type d -name vapoursynth | head -n1)"
+          [ -n "$VPDIR" ] || { echo "!! VapourSynth install dir not found" >&2; exit 1; }
+          ln -sfn "$VPDIR" "$PREFIX/lib/vapoursynth"
+          ln -sf "$VPDIR"/libvapoursynth*.so* "$VPDIR"/libvsscript*.so* "$PREFIX/lib/" 2>/dev/null || true
+          cp "$VPDIR/pkgconfig/vapoursynth.pc" "$PREFIX/lib/pkgconfig/vapoursynth.pc"
+          perl -pi -e "s{^prefix=.*}{prefix=$PREFIX/lib/vapoursynth}" "$PREFIX/lib/pkgconfig/vapoursynth.pc"
+          pkg-config --atleast-version=56 vapoursynth || {
+            echo "!! vapoursynth pc missing" >&2; exit 1; }
           ls "$PREFIX/lib"/libvapoursynth*.so* >/dev/null
           # Don't let the header-only vulkan.pc leak into the mpv build below:
           # it carries no -l flag, so mpv's meson would fail to link libvulkan.
@@ -453,16 +468,33 @@ jobs:
           cd vapoursynth-R80
           # Apple Clang 15 lacks the GNU __builtin_roundevenf used by
           # averageframesfilter.cpp; std::nearbyintf is round-half-to-even under
-          # the default rounding mode, i.e. the same result.
-          sed -i 's/__builtin_roundevenf(/std::nearbyintf(/g' src/core/averageframesfilter.cpp
-          # meson builds the core + VSScript4 (Cython-generated C) and installs
-          # libvapoursynth-script.dylib + vapoursynth-script.pc (API 80).
+          # the default rounding mode, i.e. the same result. (BSD sed needs the
+          # -i extension argument.)
+          sed -i '' 's/__builtin_roundevenf(/std::nearbyintf(/g' src/core/averageframesfilter.cpp
+          # meson builds the core + VSScript4 (Cython-generated C). R80 installs
+          # pip-style into python3's platlib (libvapoursynth.4.dylib +
+          # libvsscript.dylib + vapoursynth.pc, API 80) — surfaced into the
+          # prefix lib/ layout after install so mpv's meson (vapoursynth >= 56,
+          # headers only) and the bundler find it.
           meson setup _b --prefix="$PREFIX" --libdir=lib \
             --buildtype=release -Db_lto=false
           meson compile -C _b
           meson install -C _b
           cd "$GITHUB_WORKSPACE"
-          pkg-config --atleast-version=56 vapoursynth-script
+          # R80's meson installs into $prefix/lib/python3*/site-packages/vapoursynth
+          # (its own pip-style layout), NOT $prefix/lib. Symlink that dir into
+          # $prefix/lib and fix the relocatable vapoursynth.pc (prefix=${pcfiledir}
+          # /.. would otherwise point includedir at the wrong place after we copy
+          # it into lib/pkgconfig), so the existing PKG_CONFIG_PATH and the
+          # bundler's "$PREFIX"/lib/ globs pick everything up unchanged.
+          VPDIR="$(find "$PREFIX/lib" -maxdepth 3 -type d -name vapoursynth | head -n1)"
+          [ -n "$VPDIR" ] || { echo "!! VapourSynth install dir not found" >&2; exit 1; }
+          ln -sfn "$VPDIR" "$PREFIX/lib/vapoursynth"
+          ln -sf "$VPDIR"/libvapoursynth* "$VPDIR"/libvsscript* "$PREFIX/lib/" 2>/dev/null || true
+          cp "$VPDIR/pkgconfig/vapoursynth.pc" "$PREFIX/lib/pkgconfig/vapoursynth.pc"
+          perl -pi -e "s{^prefix=.*}{prefix=$PREFIX/lib/vapoursynth}" "$PREFIX/lib/pkgconfig/vapoursynth.pc"
+          pkg-config --atleast-version=56 vapoursynth || {
+            echo "!! vapoursynth pc missing" >&2; exit 1; }
           ls "$PREFIX"/lib/libvapoursynth*.dylib* >/dev/null
 
       # Replaces brew libbluray (bdj_jar=disabled, no JVM linkage). Installs into
@@ -622,7 +654,7 @@ jobs:
           # same @executable_path/lib layout.
           VP_LIB="$GITHUB_WORKSPACE/fel-prefix/lib"
           ZIMG_LIB="$(brew --prefix zimg)/lib"
-          for f in "$VP_LIB"/libvapoursynth-script.dylib "$VP_LIB"/libvapoursynth.dylib \
+          for f in "$VP_LIB"/libvsscript.dylib "$VP_LIB"/libvapoursynth*.dylib \
                    "$ZIMG_LIB"/libzimg.dylib "$ZIMG_LIB"/libzimg.*.dylib; do
             [ -f "$f" ] || continue
             base=$(basename "$f")
@@ -648,7 +680,7 @@ jobs:
               install_name_tool -change "$ref" "@executable_path/lib/$base" "$obj" 2>/dev/null || true
             done < <(otool -L "$obj" | awk 'NR>1 {print $1}' | grep -E "^(/opt/homebrew|/usr/local|@rpath)/")
           done
-          otool -L "$LIBDIR"/libvapoursynth-script*.dylib | grep -q libvapoursynth \
+          otool -L "$LIBDIR"/libvsscript.dylib | grep -q libvapoursynth \
             || { echo "!! VapourSynth dylibs not wired into the bundle" >&2; exit 1; }
 
           # --- BD-J: 3 jars + jlinked 6-module JRE --------------------------
