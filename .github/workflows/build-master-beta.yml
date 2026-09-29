@@ -369,14 +369,15 @@ jobs:
           # cuda-interop left at auto for the MinGW GL/D3D interop path.
           # -static: fully static link (static libgcc/libstdc++/winpthread too);
           # vulkan-1.dll / orender.dll remain dynamic imports (external files).
-          # -Dlibmpv=disabled: don't build the shared libmpv-2.dll (its shared
+          # -Dlibmpv=false: don't build the shared libmpv-2.dll (its shared
           # link would conflict with -static); we ship mpv.exe + mpv.com only.
+          # (boolean option — meson rejects "disabled" for non-feature options.)
           meson setup _b \
             --cross-file="$GITHUB_WORKSPACE/sysroot/mingw-cross.ini" \
             -Dorender=enabled -Dlua=lua52 -Dasio=enabled -Dasio-sdk="$ASIO_SDK_DIR" -Dd3d11=enabled -Dcuda-hwaccel=enabled \
             -Dlibbluray=enabled -Ddvdnav=enabled \
             -Dvapoursynth=enabled \
-            -Dlibmpv=disabled \
+            -Dlibmpv=false \
             -Dc_link_args=-static -Dcpp_link_args=-static
           meson compile -C _b
 
