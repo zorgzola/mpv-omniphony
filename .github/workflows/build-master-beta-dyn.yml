@@ -1,0 +1,487 @@
+name: master-beta-dyn
+
+# Shipping master-tracking build of mpv-omniphony: mpv master + the orender
+# spatial-audio patches, with native Dolby Vision Profile 7 FEL.
+#
+# As of 2026-07-01 FEL is UPSTREAM (mpv PR #17932 merged; libplacebo + ffmpeg
+# carry it in their masters), so there is no fork/patch to track — this build is
+# just "mpv master + orender". It still builds two deps from source because no
+# release ships the FEL API yet: libplacebo master (PL_API_VER >= 370) and ffmpeg
+# master (dovi_split BSF + DoVi stream group). See deps-fel/pins-fel.env and the
+# "Dolby Vision FEL" section of README.md. scripts/build-fel-deps.sh builds them
+# into a prefix; the mpv build links that prefix FIRST so it shadows the
+# system/Martchus ffmpeg+libplacebo.
+#
+# Opt-in / prerelease channel: this does NOT touch integration-build.yml /
+# release.yml (the stable v0.41.0 track).
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * 1' # weekly, Monday 07:00 UTC
+  push:
+    # Tag a beta (e.g. v0.4.0-fel-beta.1) to build AND publish a pre-release.
+    # (The -fel tag namespace is the established prerelease channel; kept for
+    # release-process continuity even though FEL is no longer a fork.)
+    tags:
+      - 'v*-fel*'
+    paths:
+      - 'patches-master/**'
+      - 'patches-libplacebo/**'
+      - 'deps-fel/**'
+      - 'scripts/build-fel-deps.sh'
+      - 'scripts/build-libbluray-bdj.sh'
+      - 'scripts/build-libbluray-mingw.sh'
+      - 'scripts/mpv-bdj-launcher-macos.sh'
+      - 'scripts/mpv-bdj-launcher-linux.sh'
+      - 'scripts/MPV-BD菜单启动.bat'
+      - 'scripts/BD_J_运行说明.txt'
+      - 'scripts/apply-patches-master.sh'
+      - '.github/workflows/build-master-beta-dyn.yml'
+
+env:
+  # Rolling (cron/dispatch/path-push) builds track Omniphony main; a tagged beta
+  # pins liborender to the matching release line for reproducibility.
+  OMNIPHONY_REF: ${{ startsWith(github.ref, 'refs/tags/') && 'v0.6.0' || 'main' }}
+  # Java LTS used to COMPILE the BD-J libbluray.jar (host JDK inside the build
+  # container; the .class/.jar are portable). No JRE is bundled: the patched
+  # libbluray finds a jre\ next to mpv.exe at runtime via jvm_dir
+  # "jre\bin\server" under dl_get_path(), so no .bat launcher is needed.
+  JAVA_VERSION: '21'
+  JAVA_DISTRO: 'temurin'
+
+jobs:
+  # Resolve the live upstream libplacebo master HEAD once so every platform keys
+  # its dep cache on the same SHA (master moves; this pins the cache per commit).
+  resolve-libplacebo:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.r.outputs.sha }}
+    steps:
+      - id: r
+        run: |
+          sha=$(git ls-remote https://code.videolan.org/videolan/libplacebo.git master | cut -f1)
+          echo "libplacebo master HEAD = $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  build-liborender-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Omniphony (renderer source)
+        uses: actions/checkout@v5
+        with:
+          repository: mgth/Omniphony
+          ref: ${{ env.OMNIPHONY_REF }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build orender_ffi (release)
+        run: cargo build --release -p orender_ffi
+        working-directory: omniphony-renderer
+        env:
+          # This builds a *pinned external* source tree (Omniphony at
+          # OMNIPHONY_REF), so lint policy there is not ours to enforce: an
+          # immutable tag must stay buildable as rustc grows new lints.
+          # dead_code in particular fires on liborender's dormant
+          # artifact-evaluator path, which is reachable only through code the
+          # FFI build never links.
+          RUSTFLAGS: -D warnings -A dead_code
+
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item omniphony-renderer/target/release/orender.dll out/
+          Copy-Item omniphony-renderer/orender_ffi/include/orender.h out/
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: liborender-windows-from-source-fel
+          path: out
+
+  build-windows:
+    needs: [resolve-libplacebo, build-liborender-windows]
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Bootstrap Arch + Martchus mingw-w64 repo
+        run: |
+          pacman-key --init
+          cat >> /etc/pacman.conf <<'EOF'
+
+          [ownstuff]
+          SigLevel = Optional TrustAll
+          Server = https://martchus.no-ip.biz/repo/arch/$repo/os/$arch
+          EOF
+          pacman -Syu --noconfirm
+
+      - name: Install MinGW toolchain + mpv/FEL build deps
+        run: |
+          pacman -S --noconfirm --needed \
+            base-devel git unzip zip curl rustup nasm \
+            shaderc ant \
+            jdk21-openjdk \
+            mingw-w64-gcc \
+            mingw-w64-pkg-config \
+            mingw-w64-meson \
+            mingw-w64-libass \
+            mingw-w64-vulkan-headers mingw-w64-vulkan-icd-loader \
+            mingw-w64-shaderc mingw-w64-spirv-cross mingw-w64-lcms2 mingw-w64-zlib \
+            mingw-w64-libdvdnav mingw-w64-libdvdread \
+            mingw-w64-opus
+          # ^ jdk21-openjdk (host): javac + jlink for the BD-J libbluray.jar.
+          #   The jar compile runs on the HOST (Linux container) and emits
+          #   portable .class files; the libbluray.dll dlopens jvm.dll at runtime.
+          # ^ shaderc (host) provides /usr/bin/glslc: the FEL ffmpeg master build
+          # compiles its Vulkan shaders (.comp -> .spv) with the *host* glslc at
+          # compile time. mingw-w64-shaderc alone ships only the Windows-target
+          # libs/binaries, so without the host package the cross build dies with
+          # "glslc: command not found" in libavcodec.
+          # ^ DVD playback (folder + ISO) from Martchus; libdvdnav -> libdvdread
+          # read images natively. libbluray is built from source with embedded
+          # libudfread in a later step (Martchus's lacks udfread = BD folders
+          # only); the DLL-walker in packaging bundles them all.
+          # We build our OWN libplacebo (master) + ffmpeg (master) into the
+          # MinGW sysroot below, so we intentionally do NOT install
+          # mingw-w64-libplacebo / mingw-w64-ffmpeg here.
+          rustup default stable
+          rustup target add x86_64-pc-windows-gnu
+          # Arch does not set JAVA_HOME; point it at the pacman-installed JDK 21.
+          echo "JAVA_HOME=/usr/lib/jvm/java-21-openjdk" >> "$GITHUB_ENV"
+
+      - name: Install prebuilt cargo-c
+        run: |
+          # Use the prebuilt cargo-c binary instead of `cargo install cargo-c`:
+          # building it from source drags in libz-sys/libnghttp2-sys HOST C builds
+          # that fail to assemble in this container. (The Arch cargo-c package
+          # would pull `rust`, which conflicts with rustup.) build-fel-deps.sh then
+          # skips its own `cargo install` since cargo-cinstall is on PATH.
+          CARGOC_VER=0.10.23
+          curl -sL "https://github.com/lu-zero/cargo-c/releases/download/v${CARGOC_VER}/cargo-c-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C /usr/local/bin cargo-capi cargo-cbuild cargo-cinstall cargo-ctest
+          command -v cargo-cinstall
+
+      - name: Cache FEL dep prefix (MinGW sysroot libs)
+        id: felcache
+        uses: actions/cache@v5
+        with:
+          # Cache only the artefacts we install, not the whole sysroot.
+          path: |
+            /usr/x86_64-w64-mingw32/bin
+            /usr/x86_64-w64-mingw32/lib/pkgconfig
+            /usr/x86_64-w64-mingw32/lib/libplacebo*
+            /usr/x86_64-w64-mingw32/lib/libav*
+            /usr/x86_64-w64-mingw32/lib/libsw*
+            /usr/x86_64-w64-mingw32/lib/libdovi*
+            /usr/x86_64-w64-mingw32/include/libplacebo
+            /usr/x86_64-w64-mingw32/include/libav*
+            /usr/x86_64-w64-mingw32/include/libsw*
+            /usr/x86_64-w64-mingw32/include/ffnvcodec
+          # v2: previous key cached the libsw* libs + .pc but not their headers
+          # (the include/libav* glob misses libswresample/libswscale), so a cache
+          # hit left mpv unable to find <libswresample/swresample.h>. Bump to
+          # rebuild + recache the prefix with those headers included.
+          key: fel-mingw-v2-${{ needs.resolve-libplacebo.outputs.sha }}-${{ hashFiles('deps-fel/**', 'scripts/build-fel-deps.sh') }}
+
+      - name: Write meson cross-file (x86_64-w64-mingw32)
+        run: |
+          mkdir -p sysroot
+          cat > sysroot/mingw-cross.ini <<'EOF'
+          [binaries]
+          c = 'x86_64-w64-mingw32-gcc'
+          cpp = 'x86_64-w64-mingw32-g++'
+          ar = 'x86_64-w64-mingw32-ar'
+          strip = 'x86_64-w64-mingw32-strip'
+          pkg-config = 'x86_64-w64-mingw32-pkg-config'
+          windres = 'x86_64-w64-mingw32-windres'
+          # libplacebo (master HEAD) builds a Windows import lib and needs a
+          # dlltool; meson only probes unprefixed llvm-dlltool/dlltool otherwise.
+          dlltool = 'x86_64-w64-mingw32-dlltool'
+
+          [host_machine]
+          system = 'windows'
+          cpu_family = 'x86_64'
+          cpu = 'x86_64'
+          endian = 'little'
+          EOF
+
+      - name: Build FEL deps into MinGW sysroot (cross)
+        if: steps.felcache.outputs.cache-hit != 'true'
+        run: |
+          # PREFIX = the MinGW sysroot: our master libplacebo + ffmpeg shadow
+          # Martchus's, so the cross pkg-config and the DLL-walker both pick ours
+          # up with no further wiring.
+          PREFIX=/usr/x86_64-w64-mingw32 \
+          WORK="$GITHUB_WORKSPACE/fel-work" \
+          CROSS_FILE="$GITHUB_WORKSPACE/sysroot/mingw-cross.ini" \
+            bash scripts/build-fel-deps.sh --cross
+
+      - name: Verify FEL deps (cross)
+        run: |
+          x86_64-w64-mingw32-pkg-config --atleast-version=7.370 libplacebo
+          echo "libplacebo $(x86_64-w64-mingw32-pkg-config --modversion libplacebo)"
+          x86_64-w64-mingw32-pkg-config --exists dovi
+
+      - name: Build & install libsrt from source (ABI-matched to our libstdc++)
+        run: |
+          SYS=/usr/x86_64-w64-mingw32
+          # --overwrite: the FEL ffmpeg-from-source build above already drops an
+          # openssl (libcrypto/libssl) into $SYS, so a plain `pacman -S
+          # mingw-w64-openssl` aborts with "conflicting files" on those unowned
+          # files. Let pacman take ownership of them (ABI-compatible openssl 3.x).
+          # (The stable Windows job doesn't hit this: it installs the prebuilt
+          # mingw-w64-ffmpeg, which already owns openssl via its deps.)
+          pacman -S --noconfirm --needed --overwrite '*' mingw-w64-cmake mingw-w64-openssl
+          SRT_VER=1.5.5
+          curl -sLO "https://github.com/Haivision/srt/archive/refs/tags/v${SRT_VER}.tar.gz"
+          tar xzf "v${SRT_VER}.tar.gz"
+          cd "srt-${SRT_VER}"
+          mkdir build && cd build
+          x86_64-w64-mingw32-cmake .. \
+            -DENABLE_APPS=OFF -DENABLE_BONDING=OFF -DENABLE_STATIC=OFF \
+            -DENABLE_SHARED=ON -DCMAKE_INSTALL_PREFIX="$SYS"
+          cmake --build . -j"$(nproc)"
+          cmake --install .
+          if [ -f "$SYS/bin/srt.dll" ] && [ ! -f "$SYS/bin/libsrt.dll" ]; then
+            cp "$SYS/bin/srt.dll" "$SYS/bin/libsrt.dll"
+          fi
+
+      - name: Build & install Lua 5.2 (MinGW)
+        run: |
+          SYS=/usr/x86_64-w64-mingw32
+          LUA_VER=5.2.4
+          curl -sLO "https://www.lua.org/ftp/lua-${LUA_VER}.tar.gz"
+          tar xzf "lua-${LUA_VER}.tar.gz"
+          cd "lua-${LUA_VER}"
+          make PLAT=mingw CC=x86_64-w64-mingw32-gcc \
+            AR="x86_64-w64-mingw32-ar rcu" RANLIB=x86_64-w64-mingw32-ranlib mingw
+          install -Dm755 src/lua52.dll "$SYS/bin/lua52.dll"
+          install -Dm644 src/liblua.a  "$SYS/lib/liblua52.a"
+          for h in lua lualib lauxlib luaconf; do install -Dm644 "src/$h.h" "$SYS/include/$h.h"; done
+          install -d "$SYS/lib/pkgconfig"
+          cat > "$SYS/lib/pkgconfig/lua52.pc" <<EOF
+          prefix=$SYS
+          libdir=\${prefix}/lib
+          includedir=\${prefix}/include
+
+          Name: Lua
+          Description: Lua 5.2 (MinGW cross build)
+          Version: ${LUA_VER}
+          Libs: -L\${libdir} -llua52
+          Cflags: -I\${includedir}
+          EOF
+
+      - name: Build & install libbluray with BD-ISO (libudfread) + BD-J (jar)
+        run: |
+          # Martchus ships libbluray without libudfread (BD folders only). Build
+          # it from source with the vendored udfread embedded so raw BD ISOs
+          # open; installs over the MinGW sysroot the mpv build below links to.
+          # JAVA_HOME (pacman jdk21-openjdk, exported above) auto-enables the
+          # BD-J jar — libbluray.dll then dlopens jvm.dll from the bundled JRE.
+          # The cross-file was written above (Write meson cross-file step).
+          CROSS_FILE="$GITHUB_WORKSPACE/sysroot/mingw-cross.ini" \
+            bash scripts/build-libbluray-mingw.sh
+
+      - name: Download liborender (built from source)
+        uses: actions/download-artifact@v7
+        with:
+          name: liborender-windows-from-source-fel
+          path: /tmp/liborender
+
+      - name: Install liborender into MinGW sysroot
+        run: |
+          SYS=/usr/x86_64-w64-mingw32
+          install -Dm755 /tmp/liborender/orender.dll "$SYS/bin/orender.dll"
+          install -Dm644 /tmp/liborender/orender.h   "$SYS/include/orender.h"
+          install -Dm755 /tmp/liborender/orender.dll "$SYS/lib/orender.dll"
+          install -d "$SYS/lib/pkgconfig"
+          cat > "$SYS/lib/pkgconfig/orender.pc" <<EOF
+          prefix=$SYS
+          libdir=\${prefix}/lib
+          includedir=\${prefix}/include
+
+          Name: orender
+          Description: Omniphony renderer C library
+          Version: 0.99.0
+          Libs: -L\${libdir} -lorender
+          Cflags: -I\${includedir}
+          EOF
+
+      - name: Apply orender patches onto mpv master
+        run: |
+          bash scripts/apply-patches-master.sh
+          src="$(ls -d build/mpv-master-* | grep -v 'mpv-master-clone$' | head -n1)"
+          echo "MPV_DIR=$src" >> "$GITHUB_ENV"
+
+      # ao_asio needs the Steinberg ASIO SDK headers (GPLv3 half of its dual
+      # licence). Exports ASIO_SDK_DIR, consumed by -Dasio-sdk below.
+      - name: Setup ASIO SDK
+        uses: ./.github/actions/setup-asio-sdk
+
+      # VapourSynth: mpv's vf_vapoursynth only needs the VSScript4 headers + a
+      # vapoursynth-script(.pc) >= 56 at build time (meson uses Cflags/-I, no
+      # linking — the filter dlopens VSScript.dll at runtime). Pull the headers
+      # from the R80 source tarball into the MinGW sysroot and write a .pc.
+      - name: Install VapourSynth headers into MinGW sysroot
+        run: |
+          set -euo pipefail
+          SYS=/usr/x86_64-w64-mingw32
+          curl -fsSL https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R80.tar.gz | tar xz
+          cp -r vapoursynth-R80/include/. "$SYS/include/"
+          cat > "$SYS/lib/pkgconfig/vapoursynth.pc" <<EOF
+          prefix=$SYS
+          includedir=\${prefix}/include
+
+          Name: vapoursynth
+          Description: VapourSynth video processing framework (VSScript4 headers, runtime-dlopen)
+          Version: 80
+          Cflags: -I\${includedir}
+          EOF
+          # mpv prefers `vapoursynth-script`; mirror the .pc so the >= 56 check
+          # matches by name too.
+          cat > "$SYS/lib/pkgconfig/vapoursynth-script.pc" <<EOF
+          prefix=$SYS
+          includedir=\${prefix}/include
+
+          Name: vapoursynth-script
+          Description: VapourSynth VSScript4 API (headers only, runtime-dlopen)
+          Version: 80
+          Cflags: -I\${includedir}
+          EOF
+          x86_64-w64-mingw32-pkg-config --atleast-version=56 vapoursynth-script
+          test -f "$SYS/include/VSScript4.h"
+
+      - name: Cross-compile mpv (MinGW, linked against FEL sysroot)
+        run: |
+          cd "$MPV_DIR"
+          # cuda-hwaccel forced on (FEL ffmpeg + nv-codec-headers provide nvdec);
+          # cuda-interop left at auto for the MinGW GL/D3D interop path.
+          meson setup _b \
+            --cross-file="$GITHUB_WORKSPACE/sysroot/mingw-cross.ini" \
+            -Dorender=enabled -Dlua=lua52 -Dasio=enabled -Dasio-sdk="$ASIO_SDK_DIR" -Dd3d11=enabled -Dcuda-hwaccel=enabled \
+            -Dlibbluray=enabled -Ddvdnav=enabled \
+            -Dvapoursynth=enabled
+          meson compile -C _b
+
+      - name: Package (zip, DLL-walker bundles FEL DLLs from sysroot)
+        shell: bash
+        run: |
+          SYS=/usr/x86_64-w64-mingw32
+          mkdir -p staging
+          cp "$MPV_DIR/_b/mpv.exe" staging/
+          cp "$MPV_DIR/_b/mpv.com" staging/
+          cp "$SYS/bin/orender.dll" staging/
+          cp "$SYS/include/orender.h" staging/
+          cp README.md staging/
+          should_skip() {
+            case "$1" in
+              KERNEL32.*|USER32.*|GDI32.*|ADVAPI32.*|MSVCRT.*|SHELL32.*|ole32.*|OLEAUT32.*|WS2_32.*|IMM32.*|VERSION.*|WINMM.*|d3d*|dxgi*|opengl32.*|setupapi.*|RPCRT4.*|bcrypt.*|CRYPT32.*|comdlg32.*|netapi32.*|powrprof.*|psapi.*|userenv.*|wininet.*|wintrust.*|comctl32.*|iphlpapi.*|secur32.*|uxtheme.*|dwmapi.*|crypt32.*|ncrypt.*|dnsapi.*|mpr.*|mswsock.*|odbc32.*|odbccp32.*|VCRUNTIME*|api-ms-*)
+                return 0 ;;
+            esac
+            return 1
+          }
+          worklist=(staging/mpv.exe)
+          while [ ${#worklist[@]} -gt 0 ]; do
+            exe="${worklist[0]}"; worklist=("${worklist[@]:1}")
+            for dll in $(x86_64-w64-mingw32-objdump -p "$exe" 2>/dev/null | awk '/DLL Name:/ {print $3}'); do
+              should_skip "$dll" && continue
+              [ -f "staging/$dll" ] && continue
+              if [ -f "$SYS/bin/$dll" ]; then
+                cp "$SYS/bin/$dll" staging/; worklist+=("staging/$dll"); echo "  + $dll"
+              else
+                echo "  ! NOT FOUND: $dll"
+              fi
+            done
+          done
+          for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
+            [ -f "$SYS/bin/$dll" ] && [ ! -f "staging/$dll" ] && cp "$SYS/bin/$dll" staging/ && echo "  + $dll (forced)"
+          done
+          # VapourSynth runtime: vf_vapoursynth dlopens VSScript.dll next to
+          # mpv.exe, which loads vapoursynth.dll in turn (same directory). Pull
+          # both from the official R80 portable zip so the build is self-contained
+          # (plugins/cores are NOT bundled — users install full VapourSynth for
+          # those, or point the filter at their own install).
+          curl -fsSLo vsportable.zip \
+            https://github.com/vapoursynth/vapoursynth/releases/download/R80/VapourSynth64-Portable-R80.zip
+          unzip -o -q vsportable.zip -d vsportable
+          vsdll=$(find vsportable -iname 'VSScript.dll' -o -iname 'vapoursynth.dll' -o -iname 'libvapoursynth.dll' | head -n2)
+          echo "$vsdll"
+          while read -r dll; do
+            [ -z "$dll" ] && continue
+            cp "$dll" "staging/$(basename "$dll")" && echo "  + $(basename "$dll") (VapourSynth)"
+          done <<< "$vsdll"
+          # BD-J: the two versioned libbluray-*.jar ship at mpv.exe level —
+          # libbluray's loader (dl_get_path() = this DLL's directory) finds them
+          # there with no .bat launcher. The jre\ folder is NOT bundled: users
+          # copy their own JRE next to mpv.exe, and the patched _load_jvm()
+          # locates <exe dir>\jre\bin\server\jvm.dll on its own (no JAVA_HOME,
+          # no registry entry needed).
+          cp -p "$SYS"/share/libbluray/libbluray-j2se-*.jar "$SYS"/share/libbluray/libbluray-awt-j2se-*.jar staging/ 2>/dev/null || true
+          echo "  + BDJ jars: $(ls staging/libbluray-j2se*.jar staging/libbluray-awt-j2se*.jar 2>/dev/null | tr '\n' ' ')"
+          ls -la staging/
+          # Non-single-file build: plain zip of mpv.exe + all runtime DLLs
+          # (incl. VapourSynth dlls, jars, orender.dll) — no 7z SFX, no
+          # fully-static link. Users extract the zip next to their JRE.
+          ( cd staging && zip -r "$GITHUB_WORKSPACE/mpv-omniphony-fel-windows-x86_64.zip" . -x '*.zip' )
+          ls -la mpv-omniphony-fel-windows-x86_64.zip
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mpv-omniphony-fel-windows-x86_64
+          path: mpv-omniphony-fel-windows-x86_64.zip
+
+  # Publish a pre-release only for a beta tag (e.g. v0.4.0-fel-beta.1), onto the
+  # engine repo mgth/Omniphony (the download hub) as tag mpv-<ref>, like
+  # release.yml. Skipped for cron/dispatch/path-push runs (those just upload CI
+  # artifacts).
+  publish-beta:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: mpv-omniphony-fel-windows-x86_64
+
+      - name: Publish master beta pre-release
+        uses: softprops/action-gh-release@v3
+        with:
+          # Publish to the engine repo (the download hub), like release.yml. The
+          # 'mpv-' tag prefix matches neither Omniphony's v* (Studio) nor
+          # liborender-v* triggers, so it starts no build there. Needs the
+          # OMNIPHONY_RELEASE_TOKEN secret (contents:write on mgth/Omniphony).
+          repository: mgth/Omniphony
+          token: ${{ secrets.OMNIPHONY_RELEASE_TOKEN }}
+          tag_name: mpv-${{ github.ref_name }}
+          name: 'mpv-omniphony ${{ github.ref_name }} — master (spatial audio + enhanced video-range)'
+          prerelease: true
+          make_latest: false
+          body: |
+            Master-tracking Windows build of mpv-omniphony: mpv **master** + the
+            orender spatial-audio patches, with **native enhanced video-range
+            playback** and BD-J Blu-ray menus. liborender from Omniphony
+            `${{ env.OMNIPHONY_REF }}`.
+            **Beta — NOT a stable release.**
+
+            The zip contains mpv.exe + its runtime DLLs (incl. VapourSynth
+            dlls), the two `libbluray-*.jar`, and `orender.dll` — no nested zip.
+            Extract all next to the JRE, and drop a JRE at `jre\` next to it
+            (libbluray finds
+            `jre\bin\server\jvm.dll` automatically — no launcher, no JAVA_HOME).
+
+            **NOT bundled:** the decoder bridge plugin (`*_bridge.dll` / `.so`).
+            Provide it via `--ad-orender-bridge-path=<absolute path>` or drop it
+            next to `mpv(.exe)`.
+
+            **Credits:** the enhanced video-range support is upstream mpv work by
+            [kasper93](https://github.com/kasper93) (Kacper Michajłow) — mpv
+            [PR #17932](https://github.com/mpv-player/mpv/pull/17932), merged into
+            mpv master (v0.42.0), building on the matching libplacebo + ffmpeg
+            upstream support. This build tracks upstream master and packages it.
+          files: |
+            mpv-omniphony-fel-windows-x86_64.zip
