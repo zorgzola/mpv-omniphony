@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Build libdvdread + libdvdnav STATICALLY from source into the MinGW cross
 # sysroot. Martchus ships them only as DLLs (no .a — checked 2026-09-29), so a
 # fully-static mpv.exe must rebuild them static. DVD folder + ISO playback stays:

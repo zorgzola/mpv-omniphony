@@ -218,7 +218,18 @@ jobs:
           # files. Let pacman take ownership of them (ABI-compatible openssl 3.x).
           # (The stable Windows job doesn't hit this: it installs the prebuilt
           # mingw-w64-ffmpeg, which already owns openssl via its deps.)
-          pacman -S --noconfirm --needed --overwrite '*' mingw-w64-cmake mingw-w64-openssl
+          # Retry loop: martchus.no-ip.biz is flaky and one timed-out file aborts
+          # the whole transaction (hit on the static single-file run #28/#29).
+          srt_deps_ok=
+          for i in 1 2 3 4 5; do
+            if pacman -S --noconfirm --needed --overwrite '*' mingw-w64-cmake mingw-w64-openssl; then
+              srt_deps_ok=1
+              break
+            fi
+            echo "!! pacman attempt $i/5 failed (network), retrying in 15s" >&2
+            sleep 15
+          done
+          [ -n "$srt_deps_ok" ] || { echo "!! pacman failed after 5 attempts (martchus.no-ip.biz unreachable)" >&2; exit 1; }
           SRT_VER=1.5.5
           curl -sLO "https://github.com/Haivision/srt/archive/refs/tags/v${SRT_VER}.tar.gz"
           tar xzf "v${SRT_VER}.tar.gz"
