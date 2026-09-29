@@ -42,9 +42,10 @@ env:
   # Rolling (cron/dispatch/path-push) builds track Omniphony main; a tagged beta
   # pins liborender to the matching release line for reproducibility.
   OMNIPHONY_REF: ${{ startsWith(github.ref, 'refs/tags/') && 'v0.6.0' || 'main' }}
-  # Java LTS used for BD-J (libbluray.jar compile + jlink runtime bundled on
-  # Linux/macOS; the Windows build bundles the Adoptium JRE 21 zip instead,
-  # since jlink inside the Linux container can't emit a Windows runtime).
+  # Java LTS used to COMPILE the BD-J libbluray.jar (host JDK inside the build
+  # container; the .class/.jar are portable). No JRE is bundled: the patched
+  # libbluray finds a jre\ next to mpv.exe at runtime via jvm_dir
+  # "jre\bin\server" under dl_get_path(), so no .bat launcher is needed.
   JAVA_VERSION: '21'
   JAVA_DISTRO: 'temurin'
 
@@ -412,26 +413,38 @@ jobs:
             [ -z "$dll" ] && continue
             cp "$dll" "staging/$(basename "$dll")" && echo "  + $(basename "$dll") (VapourSynth)"
           done <<< "$vsdll"
-          # BD-J runtime: 3 jars + a bundled JRE. jlink can't emit a Windows JRE
-          # from this Linux container, so ship the official Adoptium Temurin 21
-          # JRE x64 zip instead (~40 MB). The .bat launcher prefers
-          # share\libbluray\jre\bin\server\jvm.dll, then falls back to JAVA_HOME.
-          mkdir -p staging/share/libbluray
-          cp -p "$SYS"/share/libbluray/libbluray*.jar staging/share/libbluray/ 2>/dev/null || true
-          echo "  + BDJ jars: $(ls staging/share/libbluray/ | tr '\n' ' ')"
-          curl -fsSL -o jre21.zip \
-            "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jre/hotspot/normal/eclipse?project=jdk"
-          unzip -q jre21.zip -d jre21
-          jvm_path="$(find jre21 -path '*/bin/server/jvm.dll' -type f | head -1)"
-          [ -n "$jvm_path" ] \
-            || { echo "!! bundled JRE missing bin/server/jvm.dll" >&2; find jre21 -maxdepth 3 | head -20; exit 1; }
-          jre_root="${jvm_path%/bin/server}"
-          mv "$jre_root" staging/share/libbluray/jre
-          echo "  + bundled JRE: $(du -sh staging/share/libbluray/jre | cut -f1)"
-          cp "${GITHUB_WORKSPACE}/scripts/MPV-BD菜单启动.bat" staging/
-          cp "${GITHUB_WORKSPACE}/scripts/BD_J_运行说明.txt" staging/
+          # BD-J: the two versioned libbluray-*.jar ship at mpv.exe level —
+          # libbluray's loader (dl_get_path() = this DLL's directory) finds them
+          # there with no .bat launcher. The jre\ folder is NOT bundled: users
+          # copy their own JRE next to mpv.exe, and the patched _load_jvm()
+          # locates <exe dir>\jre\bin\server\jvm.dll on its own (no JAVA_HOME,
+          # no registry entry needed).
+          cp -p "$SYS"/share/libbluray/libbluray-j2se-*.jar "$SYS"/share/libbluray/libbluray-awt-j2se-*.jar staging/ 2>/dev/null || true
+          echo "  + BDJ jars: $(ls staging/libbluray-j2se*.jar staging/libbluray-awt-j2se*.jar 2>/dev/null | tr '\n' ' ')"
           ls -la staging/
-          cd staging && zip -r "../mpv-omniphony-fel-windows-x86_64.zip" .
+          # Single-file mpv.exe: a 7-Zip SFX that self-extracts mpv.exe + all
+          # runtime DLLs (incl. the VapourSynth dlls). jars / orender.dll / jre
+          # stay OUTSIDE the SFX. Build it with the official 7-Zip Linux package,
+          # which ships the Windows 7z.sfx GUI stub — the SFX is a native .exe
+          # despite the Linux build host.
+          mkdir -p sfxdir 7zsfx
+          for f in staging/*; do
+            base="$(basename "$f")"
+            case "$base" in
+              orender.dll|orender.h|README.md|libbluray*.jar) echo "  (outside SFX) $base" ;;
+              *) cp -p "$f" "sfxdir/$base" ;;
+            esac
+          done
+          curl -fsSL -o 7z-linux.tar.xz "https://www.7-zip.org/a/7z2602-linux-x64.tar.xz"
+          tar xf 7z-linux.tar.xz -C 7zsfx
+          test -f 7zsfx/7z.sfx || { echo "!! 7z.sfx missing from the 7-Zip Linux package" >&2; exit 1; }
+          ( cd sfxdir && "$GITHUB_WORKSPACE/7zsfx/7zz" a -sfx"$GITHUB_WORKSPACE/7zsfx/7z.sfx" -t7z mpv-omniphony-fel-windows-x86_64-sfx.exe * )
+          mv sfxdir/mpv-omniphony-fel-windows-x86_64-sfx.exe .
+          zip -j "mpv-omniphony-fel-windows-x86_64.zip" \
+            mpv-omniphony-fel-windows-x86_64-sfx.exe \
+            staging/libbluray-j2se*.jar staging/libbluray-awt-j2se*.jar \
+            staging/orender.dll
+          ls -la mpv-omniphony-fel-windows-x86_64-sfx.exe mpv-omniphony-fel-windows-x86_64.zip
 
       - uses: actions/upload-artifact@v6
         with:
@@ -451,12 +464,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: mpv-omniphony-fel-linux-x86_64
-      - uses: actions/download-artifact@v7
-        with:
-          name: mpv-omniphony-fel-macos-arm64
-      - uses: actions/download-artifact@v7
-        with:
           name: mpv-omniphony-fel-windows-x86_64
 
       - name: Publish master beta pre-release
@@ -473,22 +480,21 @@ jobs:
           prerelease: true
           make_latest: false
           body: |
-            Master-tracking build of mpv-omniphony: mpv **master** + the orender
-            spatial-audio patches, with **native enhanced video-range playback**.
-            liborender from Omniphony `${{ env.OMNIPHONY_REF }}`.
+            Master-tracking Windows build of mpv-omniphony: mpv **master** + the
+            orender spatial-audio patches, with **native enhanced video-range
+            playback** and BD-J Blu-ray menus. liborender from Omniphony
+            `${{ env.OMNIPHONY_REF }}`.
             **Beta — NOT a stable release.**
+
+            The zip contains the single-file SFX `…-sfx.exe` (self-extracts
+            mpv.exe + DLLs), the two `libbluray-*.jar`, and `orender.dll`.
+            Place the jars + orender.dll next to the extracted mpv.exe, and drop
+            a JRE at `jre\` next to it (libbluray finds
+            `jre\bin\server\jvm.dll` automatically — no launcher, no JAVA_HOME).
 
             **NOT bundled:** the decoder bridge plugin (`*_bridge.dll` / `.so`).
             Provide it via `--ad-orender-bridge-path=<absolute path>` or drop it
             next to `mpv(.exe)`.
-
-            **macOS (Apple Silicon, experimental):** `…-fel-macos-arm64.zip` is
-            self-contained (all dylibs bundled). Enhanced video-range rendering goes through
-            Vulkan→MoltenVK, which is not yet fully conformant on Apple Silicon —
-            treat it as experimental. Clear the download quarantine
-            (`xattr -dr com.apple.quarantine mpv`), and point the Vulkan loader at
-            the bundled MoltenVK ICD:
-            `VK_ICD_FILENAMES=<dir>/share/vulkan/icd.d/MoltenVK_icd.json`.
 
             **Credits:** the enhanced video-range support is upstream mpv work by
             [kasper93](https://github.com/kasper93) (Kacper Michajłow) — mpv
@@ -496,6 +502,4 @@ jobs:
             mpv master (v0.42.0), building on the matching libplacebo + ffmpeg
             upstream support. This build tracks upstream master and packages it.
           files: |
-            mpv-omniphony-fel-linux-x86_64.zip
-            mpv-omniphony-fel-macos-arm64.zip
             mpv-omniphony-fel-windows-x86_64.zip

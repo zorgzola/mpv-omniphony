@@ -297,6 +297,60 @@ PATCH0030
     echo ">> 0030 patched: HDMV extended IG PID acceptance"
 fi
 
+# --- bundled-JRE fallback patch (bdj.c) --------------------------------------
+# Runtime JVM search order in libbluray's _load_jvm(): app-provided home ->
+# getenv("JAVA_HOME") -> Windows registry -> compile-time JDK_HOME (the build
+# machine's path, useless at runtime). None of these finds a JRE the user
+# simply drops next to mpv.exe, so the old launcher .bat had to set JAVA_HOME
+# by hand. Patch the tail of _load_jvm() to, as a last resort, dlopen jvm.dll
+# from the directory of libbluray.dll itself (dl_get_path()); jvm_dir already
+# contains "jre\bin\server" on Windows, so <exe dir>\jre\bin\server\jvm.dll
+# is found automatically — no launcher, no JAVA_HOME, no registry entry.
+BDJ_C="src/libbluray/bdj/bdj.c"
+if grep -q 'Bundled-JRE fallback' "$BDJ_C" 2>/dev/null; then
+    echo ">> bdj.c bundled-JRE fallback patch already applied"
+else
+    python3 - "$BDJ_C" <<'PATCHBDJ'
+import sys
+f = sys.argv[1]
+code = open(f).read()
+old = """    if (!*p_java_home) {
+        *p_java_home = dl_get_path();
+    }
+
+    return handle;
+}"""
+new = """    if (!*p_java_home) {
+        *p_java_home = dl_get_path();
+    }
+
+    /* Bundled-JRE fallback: when no JAVA_HOME, registry entry or compile-time
+     * path yields a working JVM, try a JRE placed next to this module (i.e.
+     * next to mpv.exe in the shipped package). dl_get_path() is the directory
+     * of this DLL and jvm_dir already contains "jre\\bin\\server" on Windows,
+     * so this finds <exe dir>\\jre\\bin\\server\\jvm.dll. This makes a .bat
+     * launcher unnecessary: no JAVA_HOME, no registry entry required. */
+    if (!handle) {
+        const char *bundled_home = dl_get_path();
+        BD_DEBUG(DBG_BDJ, "Trying bundled JRE next to %s\\n", bundled_home);
+        handle = _jvm_dlopen_a(bundled_home, jvm_dir, num_jvm_dir, jvm_lib);
+        if (handle) {
+            *p_java_home = bundled_home;
+        }
+    }
+
+    return handle;
+}"""
+if old not in code:
+    print("ERROR: could not find _load_jvm tail in bdj.c")
+    sys.exit(1)
+code = code.replace(old, new, 1)
+open(f, 'w').write(code)
+print("bdj.c patched: bundled-JRE fallback in _load_jvm()")
+PATCHBDJ
+    echo ">> bdj.c patched: bundled-JRE fallback in _load_jvm()"
+fi
+
 meson setup _b "${meson_args[@]}"
 meson compile -C _b
 meson install -C _b
