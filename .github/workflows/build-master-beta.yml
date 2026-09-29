@@ -392,8 +392,29 @@ jobs:
             [ -z "$dll" ] && continue
             cp "$dll" "staging/$(basename "$dll")" && echo "  + $(basename "$dll") (VapourSynth)"
           done <<< "$vsdll"
-          ls -la staging/
-          cd staging && zip -r "../mpv-omniphony-fel-windows-x86_64.zip" .
+          # Single-file mpv.exe: a 7-Zip SFX that self-extracts mpv.exe + all
+          # runtime DLLs (incl. the VapourSynth dlls). orender.dll stays OUTSIDE
+          # the SFX (it is dlopened at runtime; users drop it next to mpv.exe).
+          # Build it with the official 7-Zip Linux package, which ships the
+          # Windows 7z.sfx GUI stub — the SFX is a native .exe despite the
+          # Linux build host.
+          mkdir -p sfxdir 7zsfx
+          for f in staging/*; do
+            base="$(basename "$f")"
+            case "$base" in
+              orender.dll|orender.h|README.md) echo "  (outside SFX) $base" ;;
+              *) cp -p "$f" "sfxdir/$base" ;;
+            esac
+          done
+          curl -fsSL -o 7z-linux.tar.xz "https://www.7-zip.org/a/7z2602-linux-x64.tar.xz"
+          tar xf 7z-linux.tar.xz -C 7zsfx
+          test -f 7zsfx/7z.sfx || { echo "!! 7z.sfx missing from the 7-Zip Linux package" >&2; exit 1; }
+          ( cd sfxdir && "$GITHUB_WORKSPACE/7zsfx/7zz" a -sfx"$GITHUB_WORKSPACE/7zsfx/7z.sfx" -t7z mpv-omniphony-fel-windows-x86_64-sfx.exe * )
+          mv sfxdir/mpv-omniphony-fel-windows-x86_64-sfx.exe .
+          zip -j "mpv-omniphony-fel-windows-x86_64.zip" \
+            mpv-omniphony-fel-windows-x86_64-sfx.exe \
+            staging/orender.dll
+          ls -la mpv-omniphony-fel-windows-x86_64-sfx.exe mpv-omniphony-fel-windows-x86_64.zip
 
       - uses: actions/upload-artifact@v6
         with:
@@ -413,12 +434,6 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: mpv-omniphony-fel-linux-x86_64
-      - uses: actions/download-artifact@v7
-        with:
-          name: mpv-omniphony-fel-macos-arm64
-      - uses: actions/download-artifact@v7
-        with:
           name: mpv-omniphony-fel-windows-x86_64
 
       - name: Publish master beta pre-release
@@ -435,22 +450,19 @@ jobs:
           prerelease: true
           make_latest: false
           body: |
-            Master-tracking build of mpv-omniphony: mpv **master** + the orender
-            spatial-audio patches, with **native enhanced video-range playback**.
-            liborender from Omniphony `${{ env.OMNIPHONY_REF }}`.
+            Master-tracking Windows build of mpv-omniphony: mpv **master** + the
+            orender spatial-audio patches, with **native enhanced video-range
+            playback** and VapourSynth support. liborender from Omniphony
+            `${{ env.OMNIPHONY_REF }}`.
             **Beta — NOT a stable release.**
+
+            The zip contains the single-file SFX `…-sfx.exe` (self-extracts
+            mpv.exe + DLLs, incl. the VapourSynth dlls) and `orender.dll`. Drop
+            orender.dll next to the extracted mpv.exe for spatial audio.
 
             **NOT bundled:** the decoder bridge plugin (`*_bridge.dll` / `.so`).
             Provide it via `--ad-orender-bridge-path=<absolute path>` or drop it
             next to `mpv(.exe)`.
-
-            **macOS (Apple Silicon, experimental):** `…-fel-macos-arm64.zip` is
-            self-contained (all dylibs bundled). Enhanced video-range rendering goes through
-            Vulkan→MoltenVK, which is not yet fully conformant on Apple Silicon —
-            treat it as experimental. Clear the download quarantine
-            (`xattr -dr com.apple.quarantine mpv`), and point the Vulkan loader at
-            the bundled MoltenVK ICD:
-            `VK_ICD_FILENAMES=<dir>/share/vulkan/icd.d/MoltenVK_icd.json`.
 
             **Credits:** the enhanced video-range support is upstream mpv work by
             [kasper93](https://github.com/kasper93) (Kacper Michajłow) — mpv
@@ -458,6 +470,4 @@ jobs:
             mpv master (v0.42.0), building on the matching libplacebo + ffmpeg
             upstream support. This build tracks upstream master and packages it.
           files: |
-            mpv-omniphony-fel-linux-x86_64.zip
-            mpv-omniphony-fel-macos-arm64.zip
             mpv-omniphony-fel-windows-x86_64.zip
