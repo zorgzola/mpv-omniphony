@@ -11,8 +11,9 @@
 #
 # Use: drop `mingw-w64-libbluray` from the pacman install and run this instead.
 # It installs over the same MinGW prefix, so mpv's meson finds it via
-# pkg-config. libdvdnav/libdvdread (DVD, incl. ISO) still come from Martchus —
-# they read disc images natively and need no rebuild.
+# pkg-config. libdvdnav/libdvdread (DVD, incl. ISO) are rebuilt STATIC from
+# source in build-dvdnav-mingw.sh (Martchus ships DLL-only, no .a) — the
+# fully-static mpv.exe cannot link the Martchus import libs.
 #
 # Env:
 #   CROSS_FILE      meson cross-file for x86_64-w64-mingw32 (required)
@@ -53,8 +54,9 @@ echo "${LIBBLURAY_SHA256}  libbluray.tar.xz" | sha256sum -c -
 tar xf libbluray.tar.xz
 cd "libbluray-${LIBBLURAY_VER}"
 
-# default_library=shared    -> ship libbluray as a DLL (mpv links it dynamically)
-# embed_udfread=true (default) -> vendored libudfread linked statically into the DLL
+# default_library=static   -> libbluray becomes libbluray.a linked INTO mpv.exe
+#                             (the staticize step strips the sysroot of DLLs).
+# embed_udfread=true (default) -> vendored libudfread linked statically
 # bdj_jar=disabled          -> no BD-J Java menus (no JDK in CI; A/V playback only)
 # enable_tools=false        -> skip the bd_info/etc. CLI tools we don't ship
 # fontconfig/freetype/libxml2 stay at auto: resolved from $SYS via the cross
@@ -64,17 +66,16 @@ meson setup _b \
   --prefix "$SYS" \
   --libdir lib \
   --buildtype release \
-  -Ddefault_library=shared \
+  -Ddefault_library=static \
   -Dbdj_jar=disabled \
   -Denable_tools=false
 meson compile -C _b
 meson install -C _b
 
 # `meson setup` above would already have failed if libudfread were unavailable
-# (the dependency() call is not optional). Assert the DLL + .pc actually landed
-# so the mpv build that follows finds them.
-dll="$(ls "$SYS"/bin/libbluray*.dll 2>/dev/null | head -1 || true)"
-test -n "$dll" || { echo "!! libbluray DLL not installed into $SYS/bin" >&2; exit 1; }
+# (the dependency() call is not optional). Assert the static archive + .pc
+# actually landed so the mpv build that follows finds them.
+test -f "$SYS/lib/libbluray.a" || { echo "!! libbluray.a not installed into $SYS/lib" >&2; exit 1; }
 "${HOST}-pkg-config" --exists libbluray \
   || { echo "!! libbluray.pc not visible to the MinGW pkg-config" >&2; exit 1; }
-echo "OK: installed $(basename "$dll") (libbluray ${LIBBLURAY_VER} + embedded libudfread, BD-ISO enabled)"
+echo "OK: installed libbluray.a (libbluray ${LIBBLURAY_VER} + embedded libudfread, BD-ISO enabled)"

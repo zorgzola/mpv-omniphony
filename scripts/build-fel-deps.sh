@@ -131,7 +131,10 @@ fi
 # native Vulkan driver: -Dvulkan=enabled resolves against the Homebrew Vulkan
 # stack (molten-vk + vulkan-loader + vulkan-headers, plus shaderc/glslang), i.e.
 # Vulkan-on-Metal via MoltenVK. The caller must have those on PKG_CONFIG_PATH.
+# Static-only: same reason as ffmpeg — the staticize step strips the sysroot
+# of DLLs, so libplacebo must install .a for the single-exe mpv link.
 pl_args=(--prefix="$PREFIX" --libdir=lib --buildtype=release
+         -Ddefault_library=static
          -Dvulkan=enabled -Dshaderc=enabled -Dlcms=enabled
          -Ddovi=enabled -Dlibdovi=enabled -Ddemos=false)
 # d3d11 (Windows only) needs spirv-cross for SPIR-V→HLSL; without it libplacebo
@@ -187,7 +190,9 @@ git -C "$WORK/ffmpeg" clean -fdx >/dev/null 2>&1 || true
 
 # libopus: the wrapper decoder must be available as a fallback next to the
 # native opus decoder (mpv-omniphony#64 shipped FEL bundles without it).
-ff_args=(--prefix="$PREFIX" --enable-shared --disable-static
+# Static-only build: the sysroot is staticized afterwards and mpv links
+# everything into one static exe, so the FEL ffmpeg must ship .a (not DLLs).
+ff_args=(--prefix="$PREFIX" --disable-shared --enable-static
          --enable-gpl --enable-version3 --disable-doc
          --enable-libopus)
 # NVIDIA nvdec/cuvid only where NVIDIA exists; macOS auto-detects VideoToolbox
