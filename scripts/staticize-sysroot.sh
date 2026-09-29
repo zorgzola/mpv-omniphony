@@ -83,9 +83,9 @@ for pc in "$SYS"/lib/pkgconfig/*.pc; do
     new="${pair#*|}"
     libs="${libs//$old/$new}"
   done
-  python3 - "$pc" "$libs" <<'PY'
+  python3 - "$pc" "$libs" "$mod" <<'PY'
 import sys
-pc, libs = sys.argv[1], sys.argv[2]
+pc, libs, mod = sys.argv[1], sys.argv[2], sys.argv[3]
 lines = open(pc, encoding='utf-8').read().splitlines()
 out, rewritten = [], False
 for ln in lines:
