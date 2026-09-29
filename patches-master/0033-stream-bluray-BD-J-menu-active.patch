@@ -1,0 +1,24 @@
+diff --git a/stream/stream_bluray.c b/stream/stream_bluray.c
+--- a/stream/stream_bluray.c
++++ b/stream/stream_bluray.c
+@@ -996,6 +996,14 @@
+         if (!b->hdmv_mode) {
+             // Even outside HDMV we can carry disc-driven audio/sub/angle so
+             // the player tracks the disc author's defaults on a plain-title
+             // playback.
+             *st = (struct stream_nav_state){
++                // BD-J is interactive navigation too - its menus draw into the
++                // IG/PG planes, so report nav_active + menu_active like HDMV.
++                // demux_disc.c gates the demuxer cache on menu_active: while a
++                // BD-J menu is on screen read-ahead must be off, else the
++                // prefetched menu elements (picture/audio/buttons) get queued
++                // and surface out of order.
++                .nav_active = true,
++                .menu_active = b->ig.visible || b->pg.visible,
+                 .no_audio = no_audio,
+                 .active_audio_id = audio_pid,
+                 .active_sub_id = sub_pid,
+                 .sub_visible = b->sub_visible,
+                 .angle = b->current_angle + 1,
+                .num_angles = ti ? ti->angle_count : 0,
+            };
