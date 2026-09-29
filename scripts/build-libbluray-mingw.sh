@@ -135,13 +135,8 @@ else
 fi
 cd "libbluray-${LIBBLURAY_VER}"
 
-# default_library=static  -> libbluray becomes libbluray.a linked INTO mpv.exe
-#                             (the staticize step strips the sysroot of DLLs).
-#                             The BD-J jvm.dll is still dlopen()ed at runtime:
-#                             dl_get_path() resolves to the module that holds
-#                             bdj.c — mpv.exe itself when statically linked — so
-#                             <exe dir>\jre\bin\server\jvm.dll is found, no .bat.
-# embed_udfread=true (default) -> vendored libudfread linked statically
+# default_library=shared    -> ship libbluray as a DLL (mpv links it dynamically)
+# embed_udfread=true (default) -> vendored libudfread linked statically into the DLL
 # bdj_jar                   -> BD-J Java menus (host JDK required for jar)
 # enable_tools=false        -> skip the bd_info/etc. CLI tools we don't ship
 # fontconfig/freetype/libxml2 stay at auto: resolved from $SYS via the cross
@@ -151,7 +146,7 @@ meson_args=(
   --prefix "$SYS"
   --libdir lib
   --buildtype release
-  -Ddefault_library=static
+  -Ddefault_library=shared
   -Dbdj_jar="${BDJ_JAR}"
   -Denable_tools=false
   -Denable_examples=false
@@ -400,9 +395,10 @@ if [ "${BDJ_JAR}" = "enabled" ]; then
 fi
 
 # `meson setup` above would already have failed if libudfread were unavailable
-# (the dependency() call is not optional). Assert the static archive + .pc
-# actually landed so the mpv build that follows finds them.
-test -f "$SYS/lib/libbluray.a" || { echo "!! libbluray.a not installed into $SYS/lib" >&2; exit 1; }
+# (the dependency() call is not optional). Assert the DLL + .pc actually landed
+# so the mpv build that follows finds them.
+dll="$(ls "$SYS"/bin/libbluray*.dll 2>/dev/null | head -1 || true)"
+test -n "$dll" || { echo "!! libbluray DLL not installed into $SYS/bin" >&2; exit 1; }
 "${HOST}-pkg-config" --exists libbluray \
   || { echo "!! libbluray.pc not visible to the MinGW pkg-config" >&2; exit 1; }
 
@@ -435,4 +431,4 @@ if [ "${BDJ_JAR}" = "enabled" ]; then
     fi
 fi
 
-echo "OK: installed libbluray.a (libbluray ${LIBBLURAY_VER} + embedded libudfread, BD-J: ${BDJ_JAR})"
+echo "OK: installed $(basename "$dll") (libbluray ${LIBBLURAY_VER} + embedded libudfread, BD-J: ${BDJ_JAR})"

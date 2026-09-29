@@ -1,4 +1,4 @@
-﻿name: master-beta
+name: master-beta-dyn
 
 # Shipping master-tracking build of mpv-omniphony: mpv master + the orender
 # spatial-audio patches, with native Dolby Vision Profile 7 FEL.
@@ -31,14 +31,12 @@ on:
       - 'scripts/build-fel-deps.sh'
       - 'scripts/build-libbluray-bdj.sh'
       - 'scripts/build-libbluray-mingw.sh'
-      - 'scripts/build-dvdnav-mingw.sh'
-      - 'scripts/staticize-sysroot.sh'
       - 'scripts/mpv-bdj-launcher-macos.sh'
       - 'scripts/mpv-bdj-launcher-linux.sh'
       - 'scripts/MPV-BD菜单启动.bat'
       - 'scripts/BD_J_运行说明.txt'
       - 'scripts/apply-patches-master.sh'
-      - '.github/workflows/build-master-beta.yml'
+      - '.github/workflows/build-master-beta-dyn.yml'
 
 env:
   # Rolling (cron/dispatch/path-push) builds track Omniphony main; a tagged beta
@@ -142,10 +140,10 @@ jobs:
           # compile time. mingw-w64-shaderc alone ships only the Windows-target
           # libs/binaries, so without the host package the cross build dies with
           # "glslc: command not found" in libavcodec.
-          # ^ DVD playback (folder + ISO): libdvdnav/libdvdread are rebuilt
-          #   STATIC from source in a later step (Martchus ships DLL-only, no .a)
-          #   — the fully-static mpv.exe cannot link the Martchus import libs.
-          #   libbluray is built from source with embedded libudfread later too.
+          # ^ DVD playback (folder + ISO) from Martchus; libdvdnav -> libdvdread
+          # read images natively. libbluray is built from source with embedded
+          # libudfread in a later step (Martchus's lacks udfread = BD folders
+          # only); the DLL-walker in packaging bundles them all.
           # We build our OWN libplacebo (master) + ffmpeg (master) into the
           # MinGW sysroot below, so we intentionally do NOT install
           # mingw-w64-libplacebo / mingw-w64-ffmpeg here.
@@ -186,7 +184,7 @@ jobs:
           # (the include/libav* glob misses libswresample/libswscale), so a cache
           # hit left mpv unable to find <libswresample/swresample.h>. Bump to
           # rebuild + recache the prefix with those headers included.
-          key: fel-mingw-v3-${{ needs.resolve-libplacebo.outputs.sha }}-${{ hashFiles('deps-fel/**', 'scripts/build-fel-deps.sh', 'scripts/build-libbluray-mingw.sh', 'scripts/build-dvdnav-mingw.sh', 'scripts/staticize-sysroot.sh') }}
+          key: fel-mingw-v2-${{ needs.resolve-libplacebo.outputs.sha }}-${{ hashFiles('deps-fel/**', 'scripts/build-fel-deps.sh') }}
 
       - name: Write meson cross-file (x86_64-w64-mingw32)
         run: |
@@ -227,38 +225,29 @@ jobs:
           echo "libplacebo $(x86_64-w64-mingw32-pkg-config --modversion libplacebo)"
           x86_64-w64-mingw32-pkg-config --exists dovi
 
-      - name: Build & install libsrt from source (static, ABI-matched to our libstdc++)
+      - name: Build & install libsrt from source (ABI-matched to our libstdc++)
         run: |
           SYS=/usr/x86_64-w64-mingw32
           # --overwrite: the FEL ffmpeg-from-source build above already drops an
           # openssl (libcrypto/libssl) into $SYS, so a plain `pacman -S
           # mingw-w64-openssl` aborts with "conflicting files" on those unowned
-          # files. Let pacman take ownership of them (ABI-compatible openssl 3.x,
-          # ships static libcrypto.a/libssl.a — needed by the static srt below).
+          # files. Let pacman take ownership of them (ABI-compatible openssl 3.x).
           # (The stable Windows job doesn't hit this: it installs the prebuilt
           # mingw-w64-ffmpeg, which already owns openssl via its deps.)
-          # Retry loop: martchus.no-ip.biz is flaky and one timed-out file aborts
-          # the whole transaction (hit on the static single-file run #28).
-          srt_deps_ok=
-          for i in 1 2 3 4 5; do
-            if pacman -S --noconfirm --needed --overwrite '*' mingw-w64-cmake mingw-w64-openssl; then
-              srt_deps_ok=1
-              break
-            fi
-            echo "!! pacman attempt $i/5 failed (network), retrying in 15s" >&2
-            sleep 15
-          done
-          [ -n "$srt_deps_ok" ] || { echo "!! pacman failed after 5 attempts (martchus.no-ip.biz unreachable)" >&2; exit 1; }
+          pacman -S --noconfirm --needed --overwrite '*' mingw-w64-cmake mingw-w64-openssl
           SRT_VER=1.5.5
           curl -sLO "https://github.com/Haivision/srt/archive/refs/tags/v${SRT_VER}.tar.gz"
           tar xzf "v${SRT_VER}.tar.gz"
           cd "srt-${SRT_VER}"
           mkdir build && cd build
           x86_64-w64-mingw32-cmake .. \
-            -DENABLE_APPS=OFF -DENABLE_BONDING=OFF -DENABLE_STATIC=ON \
-            -DENABLE_SHARED=OFF -DCMAKE_INSTALL_PREFIX="$SYS"
+            -DENABLE_APPS=OFF -DENABLE_BONDING=OFF -DENABLE_STATIC=OFF \
+            -DENABLE_SHARED=ON -DCMAKE_INSTALL_PREFIX="$SYS"
           cmake --build . -j"$(nproc)"
           cmake --install .
+          if [ -f "$SYS/bin/srt.dll" ] && [ ! -f "$SYS/bin/libsrt.dll" ]; then
+            cp "$SYS/bin/srt.dll" "$SYS/bin/libsrt.dll"
+          fi
 
       - name: Build & install Lua 5.2 (MinGW)
         run: |
@@ -291,16 +280,10 @@ jobs:
           # it from source with the vendored udfread embedded so raw BD ISOs
           # open; installs over the MinGW sysroot the mpv build below links to.
           # JAVA_HOME (pacman jdk21-openjdk, exported above) auto-enables the
-          # BD-J jar — libbluray then dlopens jvm.dll from the JRE next to the
-          # (statically linked) mpv.exe. The cross-file was written above.
+          # BD-J jar — libbluray.dll then dlopens jvm.dll from the bundled JRE.
+          # The cross-file was written above (Write meson cross-file step).
           CROSS_FILE="$GITHUB_WORKSPACE/sysroot/mingw-cross.ini" \
             bash scripts/build-libbluray-mingw.sh
-
-      # Martchus ships libdvdnav/libdvdread only as DLLs (no .a), which a
-      # fully-static mpv.exe cannot use — rebuild them static from source.
-      - name: Build & install libdvdnav + libdvdread (static, from source)
-        run: |
-          bash scripts/build-dvdnav-mingw.sh
 
       - name: Download liborender (built from source)
         uses: actions/download-artifact@v7
@@ -371,50 +354,51 @@ jobs:
           x86_64-w64-mingw32-pkg-config --atleast-version=56 vapoursynth-script
           test -f "$SYS/include/VSScript4.h"
 
-      - name: Staticize MinGW sysroot (strip DLLs/import libs, flatten pkg-config)
-        run: |
-          # All deps are installed now. Convert $SYS to static-only: delete the
-          # dependency DLLs + import libs (keeps vulkan-1.dll + orender.dll),
-          # and rewrite every .pc so the mpv link pulls the full static
-          # transitive closure (Libs.private / Requires.private) that meson
-          # would otherwise ignore. The result links a single static mpv.exe.
-          bash scripts/staticize-sysroot.sh
-
-      - name: Cross-compile mpv (MinGW, static single-file link)
+      - name: Cross-compile mpv (MinGW, linked against FEL sysroot)
         run: |
           cd "$MPV_DIR"
           # cuda-hwaccel forced on (FEL ffmpeg + nv-codec-headers provide nvdec);
           # cuda-interop left at auto for the MinGW GL/D3D interop path.
-          # -static: fully static link (static libgcc/libstdc++/winpthread too);
-          # vulkan-1.dll / orender.dll remain dynamic imports (external files).
-          # -Dlibmpv=false: don't build the shared libmpv-2.dll (its shared
-          # link would conflict with -static); we ship mpv.exe + mpv.com only.
-          # (boolean option — meson rejects "disabled" for non-feature options.)
           meson setup _b \
             --cross-file="$GITHUB_WORKSPACE/sysroot/mingw-cross.ini" \
             -Dorender=enabled -Dlua=lua52 -Dasio=enabled -Dasio-sdk="$ASIO_SDK_DIR" -Dd3d11=enabled -Dcuda-hwaccel=enabled \
             -Dlibbluray=enabled -Ddvdnav=enabled \
-            -Dvapoursynth=enabled \
-            -Dlibmpv=false \
-            -Dc_link_args=-static -Dcpp_link_args=-static
+            -Dvapoursynth=enabled
           meson compile -C _b
 
-      - name: Package (static single-file mpv.exe + external files)
+      - name: Package (zip, DLL-walker bundles FEL DLLs from sysroot)
         shell: bash
         run: |
           SYS=/usr/x86_64-w64-mingw32
           mkdir -p staging
-          # mpv.exe is now a fully static single file (~120MB): every core dep
-          # (ffmpeg/libplacebo/libass/libbluray/libdvdnav/freetype/fontconfig/
-          # lcms2/zlib/opus/libsrt/lua52/...) is linked INTO the exe. The only
-          # imports left are Windows system DLLs + the two intentional external
-          # DLLs below, matching the official/Omniphony static single-file build.
           cp "$MPV_DIR/_b/mpv.exe" staging/
-          cp "$MPV_DIR/_b/mpv.com" staging/ 2>/dev/null || true
-          cp "$SYS/bin/vulkan-1.dll" staging/
+          cp "$MPV_DIR/_b/mpv.com" staging/
           cp "$SYS/bin/orender.dll" staging/
           cp "$SYS/include/orender.h" staging/
           cp README.md staging/
+          should_skip() {
+            case "$1" in
+              KERNEL32.*|USER32.*|GDI32.*|ADVAPI32.*|MSVCRT.*|SHELL32.*|ole32.*|OLEAUT32.*|WS2_32.*|IMM32.*|VERSION.*|WINMM.*|d3d*|dxgi*|opengl32.*|setupapi.*|RPCRT4.*|bcrypt.*|CRYPT32.*|comdlg32.*|netapi32.*|powrprof.*|psapi.*|userenv.*|wininet.*|wintrust.*|comctl32.*|iphlpapi.*|secur32.*|uxtheme.*|dwmapi.*|crypt32.*|ncrypt.*|dnsapi.*|mpr.*|mswsock.*|odbc32.*|odbccp32.*|VCRUNTIME*|api-ms-*)
+                return 0 ;;
+            esac
+            return 1
+          }
+          worklist=(staging/mpv.exe)
+          while [ ${#worklist[@]} -gt 0 ]; do
+            exe="${worklist[0]}"; worklist=("${worklist[@]:1}")
+            for dll in $(x86_64-w64-mingw32-objdump -p "$exe" 2>/dev/null | awk '/DLL Name:/ {print $3}'); do
+              should_skip "$dll" && continue
+              [ -f "staging/$dll" ] && continue
+              if [ -f "$SYS/bin/$dll" ]; then
+                cp "$SYS/bin/$dll" staging/; worklist+=("staging/$dll"); echo "  + $dll"
+              else
+                echo "  ! NOT FOUND: $dll"
+              fi
+            done
+          done
+          for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll; do
+            [ -f "$SYS/bin/$dll" ] && [ ! -f "staging/$dll" ] && cp "$SYS/bin/$dll" staging/ && echo "  + $dll (forced)"
+          done
           # VapourSynth runtime: vf_vapoursynth dlopens VSScript.dll next to
           # mpv.exe, which loads vapoursynth.dll in turn (same directory). Pull
           # both from the official R80 portable zip so the build is self-contained
@@ -423,29 +407,25 @@ jobs:
           curl -fsSLo vsportable.zip \
             https://github.com/vapoursynth/vapoursynth/releases/download/R80/VapourSynth64-Portable-R80.zip
           unzip -o -q vsportable.zip -d vsportable
+          vsdll=$(find vsportable -iname 'VSScript.dll' -o -iname 'vapoursynth.dll' -o -iname 'libvapoursynth.dll' | head -n2)
+          echo "$vsdll"
           while read -r dll; do
             [ -z "$dll" ] && continue
             cp "$dll" "staging/$(basename "$dll")" && echo "  + $(basename "$dll") (VapourSynth)"
-          done <<< "$(find vsportable -iname 'VSScript.dll' -o -iname 'vapoursynth.dll' -o -iname 'libvapoursynth.dll' | head -n2)"
+          done <<< "$vsdll"
           # BD-J: the two versioned libbluray-*.jar ship at mpv.exe level —
-          # libbluray's loader (dl_get_path() = the statically linked mpv.exe's
-          # directory) finds them there with no .bat launcher. The jre\ folder is
-          # NOT bundled: users copy their own JRE next to mpv.exe, and the
-          # patched _load_jvm() locates <exe dir>\jre\bin\server\jvm.dll on its
-          # own (no JAVA_HOME, no registry entry needed).
+          # libbluray's loader (dl_get_path() = this DLL's directory) finds them
+          # there with no .bat launcher. The jre\ folder is NOT bundled: users
+          # copy their own JRE next to mpv.exe, and the patched _load_jvm()
+          # locates <exe dir>\jre\bin\server\jvm.dll on its own (no JAVA_HOME,
+          # no registry entry needed).
           cp -p "$SYS"/share/libbluray/libbluray-j2se-*.jar "$SYS"/share/libbluray/libbluray-awt-j2se-*.jar staging/ 2>/dev/null || true
           echo "  + BDJ jars: $(ls staging/libbluray-j2se*.jar staging/libbluray-awt-j2se*.jar 2>/dev/null | tr '\n' ' ')"
-          # Verify the static link: mpv.exe must not import any bundled dep DLL.
-          echo ">> mpv.exe DLL imports:"
-          x86_64-w64-mingw32-objdump -p staging/mpv.exe | awk '/DLL Name:/ {print "    " $3}'
-          for bad in avcodec avformat avfilter avutil swresample swscale libass libplacebo libbluray dvdnav dvdread freetype fontconfig harfbuzz fribidi lcms2 opus srt libcrypto libssl zlib shaderc spirv lua winpthread libstdc++ libgcc; do
-            if x86_64-w64-mingw32-objdump -p staging/mpv.exe | grep -qi "DLL Name:.*${bad}"; then
-              echo "!! mpv.exe still imports ${bad}* — static link failed" >&2
-              exit 1
-            fi
-          done
           ls -la staging/
-          zip -j "mpv-omniphony-fel-windows-x86_64.zip" staging/*
+          # Non-single-file build: plain zip of mpv.exe + all runtime DLLs
+          # (incl. VapourSynth dlls, jars, orender.dll) — no 7z SFX, no
+          # fully-static link. Users extract the zip next to their JRE.
+          ( cd staging && zip -r "$GITHUB_WORKSPACE/mpv-omniphony-fel-windows-x86_64.zip" . -x '*.zip' )
           ls -la mpv-omniphony-fel-windows-x86_64.zip
 
       - uses: actions/upload-artifact@v6
@@ -488,11 +468,10 @@ jobs:
             `${{ env.OMNIPHONY_REF }}`.
             **Beta — NOT a stable release.**
 
-            The zip contains a **fully static single-file `mpv.exe`** (~120MB —
-            ffmpeg/libplacebo/libass/libbluray/libdvdnav/… are all linked into
-            the exe), the two `libbluray-*.jar`, `vulkan-1.dll` + `orender.dll`.
-            Place the jars + vulkan-1.dll + orender.dll next to mpv.exe, and drop
-            a JRE at `jre\` next to it (libbluray finds
+            The zip contains mpv.exe + its runtime DLLs (incl. VapourSynth
+            dlls), the two `libbluray-*.jar`, and `orender.dll` — no nested zip.
+            Extract all next to the JRE, and drop a JRE at `jre\` next to it
+            (libbluray finds
             `jre\bin\server\jvm.dll` automatically — no launcher, no JAVA_HOME).
 
             **NOT bundled:** the decoder bridge plugin (`*_bridge.dll` / `.so`).
