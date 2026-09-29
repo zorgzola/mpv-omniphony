@@ -76,6 +76,9 @@ STATIC_MAP=(
   '-lglslang|'
   '-lSPIRV|'
   '-lshaderc_util|'
+  # ffmpeg's .pc carries a Linux-style -ldl; MinGW has no libdl (dlopen lives
+  # in the CRT/kernel32), so the token must be dropped, not just whitelisted.
+  '-ldl|'
 )
 
 # ---------------------------------------------------------------------------
