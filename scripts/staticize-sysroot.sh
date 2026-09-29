@@ -65,7 +65,16 @@ done
 # ---------------------------------------------------------------------------
 STATIC_MAP=(
   '-lshaderc_shared|-lshaderc_combined'
+  '-lshaderc_static|-lshaderc_combined'
   '-lspirv-cross-c-shared|-lspirv-cross-c -lspirv-cross-cpp -lspirv-cross-hlsl -lspirv-cross-glsl -lspirv-cross-util -lspirv-cross-reflect -lspirv-cross-msl -lspirv-cross-core'
+  # shaderc_combined.a bundles glslang + SPIRV-Tools + SPIRV-Cross, so the
+  # per-module archives its .pc also lists are redundant. libSPIRV-Tools.a
+  # exists as a static archive; libglslang.a / libSPIRV.a only exist under
+  # $SYS/static/lib (never linked via -L$SYS/lib), so drop those tokens.
+  '-lSPIRV-Tools-shared|-lSPIRV-Tools'
+  '-lglslang-default-resource-limits|'
+  '-lglslang|'
+  '-lSPIRV|'
 )
 
 # ---------------------------------------------------------------------------
@@ -114,6 +123,7 @@ done
 #    system library.
 # ---------------------------------------------------------------------------
 KNOWN_SYSTEM='gdi32|user32|kernel32|advapi32|shell32|ole32|oleaut32|ws2_32|imm32|version|winmm|d3d11|dxgi|d3dcompiler_47|opengl32|setupapi|rpcrt4|bcrypt|crypt32|comdlg32|netapi32|powrprof|psapi|userenv|wininet|wintrust|comctl32|iphlpapi|secur32|uxtheme|dwmapi|ncrypt|dnsapi|mpr|mswsock|odbc32|odbccp32|uuid|mingw32|mingwex|mingwthrd|m|pthread|winpthread|gcc|gcc_eh|stdc\+\+'
+FAIL=0
 for pc in "$SYS"/lib/pkgconfig/*.pc; do
   mod="$(basename "$pc" .pc)"
   libs="$("$PKGCONFIG" --libs "$mod" 2>/dev/null || true)"
@@ -130,8 +140,11 @@ for pc in "$SYS"/lib/pkgconfig/*.pc; do
       continue
     fi
     echo "!! $mod: -l${name} resolves to nothing under $SYS/lib" >&2
-    exit 1
+    FAIL=1
   done
 done
+# Collect every unresolvable token in one pass (one CI run reveals them all);
+# bundled-in-shaderc_combined pieces must be dropped via STATIC_MAP above.
+[ "$FAIL" = 0 ] || { echo "!! staticize sanity failed (see unresolvable -l tokens above)" >&2; exit 1; }
 
 echo "OK: sysroot staticized (external DLLs: $(ls "$SYS"/bin/*.dll 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' '))"
