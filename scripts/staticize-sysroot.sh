@@ -75,6 +75,7 @@ STATIC_MAP=(
   '-lglslang-default-resource-limits|'
   '-lglslang|'
   '-lSPIRV|'
+  '-lshaderc_util|'
 )
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ done
 #    sysroot (static .a, kept import lib, or bare DLL) or be a known Windows
 #    system library.
 # ---------------------------------------------------------------------------
-KNOWN_SYSTEM='gdi32|user32|kernel32|advapi32|shell32|ole32|oleaut32|ws2_32|imm32|version|winmm|d3d11|dxgi|d3dcompiler_47|opengl32|setupapi|rpcrt4|bcrypt|crypt32|comdlg32|netapi32|powrprof|psapi|userenv|wininet|wintrust|comctl32|iphlpapi|secur32|uxtheme|dwmapi|ncrypt|dnsapi|mpr|mswsock|odbc32|odbccp32|uuid|mingw32|mingwex|mingwthrd|m|pthread|winpthread|gcc|gcc_eh|stdc\+\+'
+KNOWN_SYSTEM='gdi32|user32|kernel32|advapi32|shell32|ole32|oleaut32|ws2_32|imm32|version|winmm|d3d11|dxgi|d3dcompiler_47|opengl32|setupapi|rpcrt4|bcrypt|crypt32|comdlg32|netapi32|powrprof|psapi|userenv|wininet|wintrust|comctl32|iphlpapi|secur32|uxtheme|dwmapi|ncrypt|dnsapi|mpr|mswsock|odbc32|odbccp32|uuid|mingw32|mingwex|mingwthrd|m|pthread|winpthread|gcc|gcc_eh|stdc\+\+|dl|tiff|tiffxx'
 FAIL=0
 for pc in "$SYS"/lib/pkgconfig/*.pc; do
   mod="$(basename "$pc" .pc)"
