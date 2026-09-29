@@ -75,8 +75,13 @@ shopt -s nullglob
 for pc in "$SYS"/lib/pkgconfig/*.pc; do
   mod="$(basename "$pc" .pc)"
   libs="$("$PKGCONFIG" --static --libs "$mod" 2>/dev/null)" || {
-    echo "!! pkg-config --static --libs $mod failed (missing Requires.private dep?)" >&2
-    exit 1
+    # --static expands Requires.private; an AUX package (e.g. harfbuzz-cairo,
+    # harfbuzz-icu) can reference a .pc that isn't in this sysroot (cairo/icu
+    # aren't installed for mpv). mpv never links those, so don't fail the whole
+    # staticization — fall back to the non-static Libs (the rewrite + the sanity
+    # pass below still verify every -l resolves inside $SYS).
+    echo "!! pkg-config --static --libs $mod failed (aux dep not in sysroot?); using non-static Libs" >&2
+    libs="$("$PKGCONFIG" --libs "$mod" 2>/dev/null || true)"
   }
   for pair in "${STATIC_MAP[@]}"; do
     old="${pair%%|*}"
