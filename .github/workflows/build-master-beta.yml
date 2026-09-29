@@ -435,10 +435,16 @@ jobs:
               *) cp -p "$f" "sfxdir/$base" ;;
             esac
           done
+          # The official 7-Zip Linux package ships 7zz but NOT the Windows SFX
+          # stub (7z.sfx ships with the Windows installer); extract it from the
+          # Windows 7-Zip installer with 7zz itself.
           curl -fsSL -o 7z-linux.tar.xz "https://www.7-zip.org/a/7z2602-linux-x64.tar.xz"
           tar xf 7z-linux.tar.xz -C 7zsfx
-          test -f 7zsfx/7z.sfx || { echo "!! 7z.sfx missing from the 7-Zip Linux package" >&2; exit 1; }
-          ( cd sfxdir && "$GITHUB_WORKSPACE/7zsfx/7zz" a -sfx"$GITHUB_WORKSPACE/7zsfx/7z.sfx" -t7z mpv-omniphony-fel-windows-x86_64-sfx.exe * )
+          curl -fsSL -o 7z-windows.exe "https://www.7-zip.org/a/7z2602-x64.exe"
+          ( cd 7zsfx && ./7zz x "$GITHUB_WORKSPACE/7z-windows.exe" -y >/dev/null )
+          sfx_mod="$(find 7zsfx -iname '7z.sfx' -o -iname '7zCon.sfx' | head -1)"
+          [ -n "$sfx_mod" ] || { echo "!! no SFX module in the 7-Zip Windows installer" >&2; exit 1; }
+          ( cd sfxdir && "$GITHUB_WORKSPACE/7zsfx/7zz" a -sfx"$GITHUB_WORKSPACE/$sfx_mod" -t7z mpv-omniphony-fel-windows-x86_64-sfx.exe * )
           mv sfxdir/mpv-omniphony-fel-windows-x86_64-sfx.exe .
           zip -j "mpv-omniphony-fel-windows-x86_64.zip" \
             mpv-omniphony-fel-windows-x86_64-sfx.exe \
